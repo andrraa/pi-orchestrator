@@ -60,19 +60,44 @@ Stages 3 run **in parallel**; a `blocked` verdict from either reviewer buys exac
 
 ## Installation
 
-The extension reads its configuration from a fixed path, so install it by symlinking the repo into Pi's extension directory — the same bridge used by `pi-private-sync`.
+Install it as a **Pi package**: Pi clones the repo, reads the manifest, and loads the extension.
 
 ```bash
-git clone git@github.com:andrraa/pi-orchestrator.git ~/pi-orchestrator
-ln -sfn ~/pi-orchestrator/extensions/orchestrator.ts ~/.pi/agent/extensions/orchestrator.ts
+pi install git:github.com/andrraa/pi-orchestrator
 ```
+
+Pin a revision when you want a frozen checkout (git tags and commits are pinned; untagged installs follow the default branch):
+
+```bash
+pi install git:github.com/andrraa/pi-orchestrator@v0.1.0
+```
+
+Or install from a local clone while developing:
+
+```bash
+pi install ./pi-orchestrator
+```
+
+### Managing the package
+
+```bash
+pi list                                   # confirm it is registered
+pi update --extensions                    # reconcile the checkout
+pi remove git:github.com/andrraa/pi-orchestrator
+```
+
+The declaration is written to `~/.pi/agent/settings.json`, or to `.pi/settings.json` with `--local` for a single project.
+
+> **Remove any manual symlink first.** If you previously linked the extension into `~/.pi/agent/extensions/`, delete that symlink before installing — Pi discovers extensions in both places, and a leftover link loads the extension twice.
 
 Requirements:
 
 - **Pi Coding Agent** (`@earendil-works/pi-coding-agent`)
 - **pi-subagents** package — the extension drives it over the in-process RPC event bus
 
-Restart or reload Pi after the symlink is in place. No build step is required: Pi loads the TypeScript through `jiti`.
+Both are declared as `peerDependencies` and are supplied by the Pi host; the package ships no runtime dependencies of its own.
+
+Restart Pi after installing. No build step is required: Pi loads the TypeScript through `jiti`.
 
 ---
 
@@ -190,6 +215,7 @@ pi-orchestrator/
 ├── .gitignore                # Ignores runtime caches and backups
 ├── README.md                 # Documentation
 ├── LICENSE                   # MIT License
+├── package.json              # Pi package manifest (extensions + peer dependencies)
 ├── assets/
 │   └── banner.svg            # README banner
 └── extensions/
