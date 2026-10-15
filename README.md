@@ -28,7 +28,8 @@ A rule written in `AGENTS.md` is soft context: the main model may read it and st
 - **Four Configurable Roles:** Context engine, lead coder, security specialist, and QA — each with its own model and thinking level.
 - **Enforced Pipeline:** `orchestrate` runs research → implement → security + QA in parallel → at most one fix round, and returns one consolidated report.
 - **Write Gate:** While mode is ON and no verified pipeline run has completed, `edit`, `write`, and direct `worker` launches are blocked at the tool-call boundary.
-- **Paged Model Picker:** Pi's selector renders every option without scrolling, so model lists are paginated 8 per page instead of being clipped.
+- **Searchable Model Picker:** Pi's default selector renders every option without scrolling, so long model lists get clipped. The picker in this extension scrolls, filters as you type, and returns to the menu after a pick.
+- **Tab-Cycling Rows:** `Tab` cycles the focused row — flip the on/off toggle or step through thinking levels without leaving the menu.
 - **Fail-Open on Misconfiguration:** A broken `pi-subagents` bridge releases the gate instead of wedging the session.
 - **Child-Process Guard:** Subagent children spawn their own Pi process; the extension detects `PI_SUBAGENT_CHILD` and stays inert there.
 
@@ -112,31 +113,50 @@ Run `/orchestrator` in any Pi session:
 ### 1. Menu
 ```text
 Orchestrator
-> Enable orchestrator mode
-  Manager model (main session) — 9router/...
-  Context engine [researcher] — 9router/...
-  Lead coder [worker] — 9router/...
-  Security specialist [reviewer] — 9router/...
-  QA [reviewer] — 9router/...
-  Thinking — Context engine — default
-  ...
-  Status: orchestrator OFF
+
+  Type to search
+> Enable orchestrator         OFF
+  Manager model              9router-private/...
+  Context engine             belum dipilih
+  Lead coder                 9router-private/...
+  Security specialist        belum dipilih
+  QA                         9router-private/...
+  Thinking Context engine    default
+  Thinking Lead coder        default
+  Thinking Security specialist  default
+  Thinking QA                default
+  RPC bridge: ok
+
+  Type to search · Enter/Space to change · Esc to cancel
 ```
 
-Every role row shows the currently assigned model, so the active configuration is readable at a glance.
+The menu scrolls, so every row stays reachable. It also has its own search: press `/` or just start typing to filter rows by name.
 
-### 2. Paged Model Picker
+### 2. Row Behaviour
+
+| Action | Key | Result |
+|:---|:---|:---|
+| Toggle ON/OFF | `Tab` or `Enter` | Flips the focused row and persists immediately. |
+| Cycle thinking level | `Tab` | Steps `default → off → minimal → low → medium → high → xhigh → max → default`. |
+| Pick a model | `Enter` on a model row | Opens the model picker. |
+| Search rows | type any text | Filters the menu by row label. |
+| Close | `Esc` | Returns to the prompt. |
+
+`Tab` is the shortcut for "change the thing under the cursor" — it never moves focus out of the menu, so you can toggle on/off and walk the four thinking levels without re-opening the command.
+
+### 3. Model Picker
 ```text
-Context engine model [researcher] (halaman 1/2)
-> 9router-private/ag/gemini-3.8-flash-high
-  ...
-  → halaman berikutnya
-  Batal
+Lead coder [worker]
+
+cari> glm
+  → 9router-private/river/zai-org/GLM-5.3-Flash
+
+  ketik mencari · ↑↓ pilih · enter simpan · esc batal
 ```
 
-The active model is marked with `✓`. Navigation re-opens the picker instead of returning, and `Batal` cancels.
+No pagination. The list scrolls, the current model is marked `✓`, and typing filters (case-insensitive substring, so `3.8` and `glm53` both work). Picking a model drops you back into the menu — the command does not exit — so you can set every role in one visit.
 
-### 3. Running the pipeline
+### 4. Running the pipeline
 With mode ON, ask for a code change. The manager calls `orchestrate`, which returns:
 
 ```text
