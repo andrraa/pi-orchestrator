@@ -1,0 +1,26 @@
+{
+  "name": "pi-orchestrator",
+  "version": "0.1.0",
+  "description": "Role-based orchestration extension that forces the Pi Coding Agent to delegate through subagents instead of skipping them.",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "orchestrator",
+    "subagents"
+  ],
+  "license": "MIT",
+  "author": "Andrra Ramadan",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/andrraa/pi-orchestrator.git"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/orchestrator.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  }
+}
