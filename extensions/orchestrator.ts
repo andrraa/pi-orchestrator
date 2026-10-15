@@ -4,6 +4,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Type } from "typebox";
+import { getSettingsListTheme } from "@earendil-works/pi-coding-agent";
+import { Container, Input, type SettingItem, SettingsList } from "@earendil-works/pi-tui";
 
 const CONFIG_PATH = path.join(os.homedir(), ".pi", "agent", "orchestrator.json");
 
@@ -30,7 +32,6 @@ const DEFAULTS: Config = {
   roles: { context: "", coder: "", security: "", qa: "" },
   thinking: { context: "", coder: "", security: "", qa: "" },
 };
-const PER_PAGE = 8;
 
 // --- pi-subagents RPC bridge (in-process event bus) -------------------------
 const RPC_VERSION = 1;
@@ -81,43 +82,172 @@ function modelIds(ctx: ExtensionCommandContext): string[] {
     .sort();
 }
 
-/** Paged picker: pi's selector renders every option with no scrolling, so long lists get clipped. */
-async function pickModel(ctx: ExtensionCommandContext, title: string, current: string): Promise<string | undefined> {
+const THINKING_CYCLE = ["default", ...THINKING_LEVELS];
+const MENU_VISIBLE = 12;
+const ENABLED_ID = "enabled";
+const MANAGER_ID = "manager";
+
+/**
+ * Searchable model list. Typing filters (case-insensitive substring, so "3.8"
+ * or "glm" both hit), arrows scroll, Enter picks and Esc cancels.
+ */
+function pickModel(ctx: ExtensionCommandContext, title: string, current: string): Promise<string | undefined> {
   const all = modelIds(ctx);
   if (all.length === 0) {
     ctx.ui.notify("No models available", "error");
-    return undefined;
+    return Promise.resolve(undefined);
   }
-  const ordered = current && all.includes(current) ? [current, ...all.filter((m) => m !== current)] : all;
-  const pages = Math.ceil(ordered.length / PER_PAGE);
-  let page = 0;
+  return ctx.ui.custom<string | undefined>((tui, _theme, keybindings, done) => {
+    const input = new Input({ prompt: "cari> ", placeholder: "ketik untuk memfilter" });
+    let query = "";
+    let filtered = all;
+    let index = Math.max(0, all.indexOf(current));
 
-  for (;;) {
-    const slice = ordered.slice(page * PER_PAGE, (page + 1) * PER_PAGE).map((m) => (m === current ? `✓ ${m}` : m));
-    const nav: string[] = [];
-    if (page > 0) nav.push("← halaman sebelumnya");
-    if (page < pages - 1) nav.push("→ halaman berikutnya");
-    const choice = await ctx.ui.select(`${title} (halaman ${page + 1}/${pages})`, [...slice, ...nav, "Batal"]);
-    if (choice === undefined || choice === "Batal") return undefined;
-    if (choice === "→ halaman berikutnya") {
-      page += 1;
-      continue;
-    }
-    if (choice === "← halaman sebelumnya") {
-      page -= 1;
-      continue;
-    }
-    return choice.replace(/^✓ /, "");
-  }
+    return {
+      invalidate() {},
+      render(width: number) {
+        const lines = [`${title}`, "", ...input.render(width)];
+        if (filtered.length === 0) {
+          lines.push("  tidak ada model yang cocok");
+        } else {
+          const visible = Math.min(filtered.length, MENU_VISIBLE);
+          const from = Math.max(0, Math.min(index - Math.floor(visible / 2), filtered.length - visible));
+          for (let i = from; i < from + visible; i++) {
+            const mark = filtered[i] === current ? "✓" : i === index ? "→" : " ";
+            lines.push(`  ${mark} ${filtered[i]}`);
+          }
+          if (filtered.length > visible) lines.push(`  (${index + 1}/${filtered.length})`);
+        }
+        lines.push("");
+        lines.push(`  ketik mencari · ↑↓ pilih · ${keybindings.getKeys("tui.select.confirm").join("/")} simpan · esc batal`);
+        return lines;
+      },
+      handleInput(data: string) {
+        const confirm = keybindings.matches(data, "tui.select.confirm");
+        if (keybindings.matches(data, "tui.select.cancel")) return done(undefined);
+        if (keybindings.matches(data, "tui.select.up")) {
+          index = index === 0 ? filtered.length - 1 : index - 1;
+        } else if (keybindings.matches(data, "tui.select.down")) {
+          index = index === filtered.length - 1 ? 0 : index + 1;
+        } else if (confirm || data === "\r") {
+          return done(filtered[index]);
+        } else {
+          input.handleInput(data);
+          const value = input.getValue();
+          if (value !== query) {
+            query = value;
+            const needle = query.trim().toLowerCase();
+            filtered = needle ? all.filter((id) => id.toLowerCase().includes(needle)) : all;
+            index = Math.max(0, filtered.indexOf(current));
+          }
+        }
+        tui.requestRender();
+      },
+    };
+  });
 }
 
-/** Level picker: 7 thinking levels plus a "default (kosong)" entry that clears the level. */
-async function pickLevel(ctx: ExtensionCommandContext, title: string, current: string): Promise<string | undefined> {
-  const options = THINKING_LEVELS.map((level) => (level === current ? `✓ ${level}` : level));
-  const choice = await ctx.ui.select(title, [...options, "default (kosong)", "Batal"]);
-  if (choice === undefined || choice === "Batal") return undefined;
-  if (choice === "default (kosong)") return "";
-  return choice.replace(/^✓ /, "");
+/**
+ * One pass of the settings menu. Resolves with the row id the user activated,
+ * or undefined when they cancelled. Selecting a model rows does NOT change
+ * anything by itself: the caller opens the picker, so the menu stays reachable.
+ */
+function menuOnce(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<string | undefined> {
+  const cfg = load();
+  const manager = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "default";
+
+  return ctx.ui.custom<string | undefined>((tui, theme, _keybindings, done) => {
+    const value = (key: RoleKey) => cfg.roles[key] || "belum dipilih";
+    const items: SettingItem[] = [
+      { id: ENABLED_ID, label: "Enable orchestrator", currentValue: cfg.enabled ? "ON" : "OFF", values: ["ON", "OFF"] },
+      // a one-element `values` array makes Enter fire onChange without moving focus
+      { id: MANAGER_ID, label: "Manager model", currentValue: manager, values: [manager] },
+      ...ROLES.map((r) => ({ id: r.key, label: r.label, currentValue: value(r.key), values: [value(r.key)], description: `${r.agent} — ${r.hint}` })),
+      ...ROLES.map((r) => ({
+        id: `think:${r.key}`,
+        label: `Thinking ${r.label}`,
+        currentValue: cfg.thinking[r.key] || "default",
+        values: THINKING_CYCLE,
+      })),
+      { id: "status", label: `RPC bridge: ${pipelineState.unavailable ? "unavailable" : "ok"}`, currentValue: "", values: [""] },
+    ];
+
+    const list = new SettingsList(
+      items,
+      MENU_VISIBLE,
+      getSettingsListTheme(),
+      (id, newValue) => {
+        if (id === ENABLED_ID) {
+          cfg.enabled = newValue === "ON";
+          persist(cfg);
+          ctx.ui.notify(`Orchestrator mode: ${cfg.enabled ? "ON" : "OFF"}`, "info");
+          return;
+        }
+        if (id.startsWith("think:")) {
+          cfg.thinking[id.slice(6) as RoleKey] = newValue === "default" ? "" : newValue;
+          persist(cfg);
+          return;
+        }
+        if (id === MANAGER_ID || ROLES.some((r) => r.key === id)) return done(id);
+      },
+      () => done(undefined),
+      { enableSearch: true },
+    );
+    list.selectItem(ENABLED_ID);
+
+    const title = {
+      invalidate() {},
+      render: (_width: number) => [theme.fg("accent", theme.bold("Orchestrator")), ""],
+    };
+    const container = new Container();
+    container.addChild(title);
+    container.addChild(list);
+
+    return {
+      invalidate() {
+        container.invalidate();
+      },
+      render(width: number) {
+        return container.render(width);
+      },
+      handleInput(data: string) {
+        // Tab cycles the highlighted row instead of leaving the menu
+        list.handleInput(data === "\t" ? " " : data);
+        tui.requestRender();
+      },
+    };
+  });
+}
+
+/** Menu and picker alternate so a selection lands back in the menu, not at the prompt. */
+async function openMenu(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
+  for (;;) {
+    const row = await menuOnce(pi, ctx);
+    if (row === undefined) return;
+
+    if (row === MANAGER_ID) {
+      const current = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "";
+      const pick = await pickModel(ctx, "Manager model (main session)", current);
+      if (!pick) continue;
+      const [provider, ...rest] = pick.split("/");
+      const model = ctx.modelRegistry.find(provider, rest.join("/"));
+      if (!model) {
+        ctx.ui.notify(`Model not found: ${pick}`, "error");
+        continue;
+      }
+      const ok = await pi.setModel(model);
+      ctx.ui.notify(ok ? `Manager model → ${pick}` : `No auth configured for provider: ${provider}`, ok ? "info" : "error");
+      continue;
+    }
+
+    const key = row as RoleKey;
+    const pick = await pickModel(ctx, `${role(key).label} [${role(key).agent}]`, load().roles[key]);
+    if (!pick) continue;
+    const cfg = load();
+    cfg.roles[key] = pick;
+    persist(cfg);
+    ctx.ui.notify(`${role(key).label} → ${pick}`, "info");
+  }
 }
 
 function role(k: RoleKey) {
@@ -369,80 +499,19 @@ export default function (pi: ExtensionAPI) {
   pi.registerCommand("orchestrator", {
     description: "pi-subagents orchestrator: toggle on/off, pick a model and thinking level per role",
     handler: async (args, ctx) => {
-      const cfg = load();
       const arg = args.trim().toLowerCase();
-
       if (arg === "on" || arg === "off") {
+        const cfg = load();
         cfg.enabled = arg === "on";
         persist(cfg);
         ctx.ui.notify(`Orchestrator mode: ${cfg.enabled ? "ON" : "OFF"}`, "info");
         return;
       }
-
-      const manager = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "default";
-      const roleOption = (r: (typeof ROLES)[number]) => `${r.label} [${r.agent}] — ${cfg.roles[r.key] || "belum dipilih"}`;
-      const thinkingOption = (r: (typeof ROLES)[number]) => `Thinking — ${r.label} — ${cfg.thinking[r.key] || "default"}`;
-      const menu = [
-        cfg.enabled ? "Disable orchestrator mode" : "Enable orchestrator mode",
-        `Manager model (main session) — ${manager}`,
-        ...ROLES.map(roleOption),
-        ...ROLES.map(thinkingOption),
-        `Status: orchestrator ${cfg.enabled ? "ON" : "OFF"}${pipelineState.unavailable ? " (RPC bridge unavailable)" : ""}`,
-      ];
-      const choice = await ctx.ui.select("Orchestrator", menu);
-      if (choice === undefined) return;
-
-      if (choice.startsWith("Enable")) {
-        cfg.enabled = true;
-        persist(cfg);
-        ctx.ui.notify("Orchestrator mode: ON — delegates substantial work via subagents", "info");
+      if (ctx.mode !== "tui") {
+        ctx.ui.notify("/orchestrator needs TUI mode", "error");
         return;
       }
-      if (choice.startsWith("Disable")) {
-        cfg.enabled = false;
-        persist(cfg);
-        ctx.ui.notify("Orchestrator mode: OFF", "info");
-        return;
-      }
-      if (choice.startsWith("Status:")) {
-        const detail = ROLES.map((r) => `${r.key}=${cfg.roles[r.key] || "default"}/${cfg.thinking[r.key] || "default"}`).join(" | ");
-        ctx.ui.notify(`enabled=${cfg.enabled} | manager=${manager} | ${detail}`, "info");
-        return;
-      }
-      if (choice.startsWith("Manager model")) {
-        const pick = await pickModel(ctx, "Manager model (main session)", manager === "default" ? "" : manager);
-        if (!pick) return;
-        const [provider, ...rest] = pick.split("/");
-        const model = ctx.modelRegistry.find(provider, rest.join("/"));
-        if (!model) {
-          ctx.ui.notify(`Model not found: ${pick}`, "error");
-          return;
-        }
-        const ok = await pi.setModel(model);
-        ctx.ui.notify(ok ? `Manager model → ${pick}` : `No auth configured for provider: ${provider}`, ok ? "info" : "error");
-        return;
-      }
-      const thinkingRole = ROLES.find((r) => choice === thinkingOption(r));
-      if (thinkingRole) {
-        const pick = await pickLevel(
-          ctx,
-          `Thinking — ${thinkingRole.label} [${thinkingRole.agent}]`,
-          cfg.thinking[thinkingRole.key],
-        );
-        if (pick === undefined) return;
-        cfg.thinking[thinkingRole.key] = pick;
-        persist(cfg);
-        ctx.ui.notify(`${thinkingRole.label} thinking → ${pick || "default"}`, "info");
-        return;
-      }
-      const r = ROLES.find((item) => choice === roleOption(item));
-      if (r) {
-        const pick = await pickModel(ctx, `${r.label} model [${r.agent}]`, cfg.roles[r.key]);
-        if (!pick) return;
-        cfg.roles[r.key] = pick;
-        persist(cfg);
-        ctx.ui.notify(`${r.label} → ${pick}`, "info");
-      }
+      await openMenu(pi, ctx);
     },
   });
 
