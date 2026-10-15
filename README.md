@@ -1,0 +1,204 @@
+<h1 align="center">pi-orchestrator</h1>
+
+<p align="center">
+  <em>Role-based orchestration extension that forces the Pi Coding Agent to delegate through subagents instead of skipping them.</em>
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Pi-Coding%20Agent-0969da?style=flat-square" alt="Pi Coding Agent" />
+  <img src="https://img.shields.io/badge/Pipeline-Research%20%E2%86%92%20Code%20%E2%86%92%20Audit-2ea44f?style=flat-square" alt="Pipeline" />
+  <img src="https://img.shields.io/badge/Roles-4%20configurable-8250df?style=flat-square" alt="Roles" />
+  <img src="https://img.shields.io/badge/License-MIT-bf8700?style=flat-square" alt="License" />
+</p>
+
+<p align="center">
+  <img src="assets/banner.svg" alt="pi-orchestrator banner" width="850" />
+</p>
+
+---
+
+## Overview
+
+**pi-orchestrator** is a Pi Coding Agent extension that turns delegation from a *suggestion* into *enforced routing*.
+
+A rule written in `AGENTS.md` is soft context: the main model may read it and still decide to do everything itself. This extension closes that gap with three layers — a system-prompt rule injected every turn, a hard `orchestrate` tool that runs the whole pipeline itself, and a tool-call gate that blocks the manager from writing code while the pipeline owns the change.
+
+### Features
+- **On/Off Toggle:** `/orchestrator` switches mode instantly; the state persists in `~/.pi/agent/orchestrator.json`.
+- **Four Configurable Roles:** Context engine, lead coder, security specialist, and QA — each with its own model and thinking level.
+- **Enforced Pipeline:** `orchestrate` runs research → implement → security + QA in parallel → at most one fix round, and returns one consolidated report.
+- **Write Gate:** While mode is ON and no verified pipeline run has completed, `edit`, `write`, and direct `worker` launches are blocked at the tool-call boundary.
+- **Paged Model Picker:** Pi's selector renders every option without scrolling, so model lists are paginated 8 per page instead of being clipped.
+- **Fail-Open on Misconfiguration:** A broken `pi-subagents` bridge releases the gate instead of wedging the session.
+- **Child-Process Guard:** Subagent children spawn their own Pi process; the extension detects `PI_SUBAGENT_CHILD` and stays inert there.
+
+---
+
+## Architecture
+
+| Role | Default Agent | Stage | Responsibility |
+|:---|:---|:---|:---|
+| **Manager** | *main session* | routes + accepts | Picks the models, hands off the task, synthesizes the report, makes the final call. |
+| **Context engine** | `researcher` | 1 | Gathers the files, facts, and constraints. Read-only. |
+| **Lead coder** | `worker` | 2 | Implements from that context. The only writer. |
+| **Security specialist** | `reviewer` | 3 | Audits the diff for injection, authorization, secrets, and unsafe input handling. |
+| **QA** | `reviewer` | 3 | Runs the tests and reports pass/fail evidence. |
+
+Stages 3 run **in parallel**; a `blocked` verdict from either reviewer buys exactly one fix round before the final answer.
+
+---
+
+## Enforcement Layers
+
+1. **System prompt (advisory).** Every user turn, `before_agent_start` appends the pipeline rules to `systemPromptOptions.promptGuidelines`.
+2. **`orchestrate` tool (structural).** The whole staged fan-out runs inside the tool, so the manager cannot forget the sequence — there is nothing to remember.
+3. **`tool_call` gate (hard).** `edit`, `write`, and direct `worker` launches are rejected until a pipeline run reports explicit success.
+
+> The gate deliberately fails **closed** on ambiguous completion payloads (editing stays blocked) and **open** when the RPC bridge is unavailable (editing is released).
+
+---
+
+## Installation
+
+The extension reads its configuration from a fixed path, so install it by symlinking the repo into Pi's extension directory — the same bridge used by `pi-private-sync`.
+
+```bash
+git clone git@github.com:andrraa/pi-orchestrator.git ~/pi-orchestrator
+ln -sfn ~/pi-orchestrator/extensions/orchestrator.ts ~/.pi/agent/extensions/orchestrator.ts
+```
+
+Requirements:
+
+- **Pi Coding Agent** (`@earendil-works/pi-coding-agent`)
+- **pi-subagents** package — the extension drives it over the in-process RPC event bus
+
+Restart or reload Pi after the symlink is in place. No build step is required: Pi loads the TypeScript through `jiti`.
+
+---
+
+## Usage
+
+Run `/orchestrator` in any Pi session:
+
+```text
+/orchestrator
+```
+
+### 1. Menu
+```text
+Orchestrator
+> Enable orchestrator mode
+  Manager model (main session) — 9router/...
+  Context engine [researcher] — 9router/...
+  Lead coder [worker] — 9router/...
+  Security specialist [reviewer] — 9router/...
+  QA [reviewer] — 9router/...
+  Thinking — Context engine — default
+  ...
+  Status: orchestrator OFF
+```
+
+Every role row shows the currently assigned model, so the active configuration is readable at a glance.
+
+### 2. Paged Model Picker
+```text
+Context engine model [researcher] (halaman 1/2)
+> 9router-private/ag/gemini-3.8-flash-high
+  ...
+  → halaman berikutnya
+  Batal
+```
+
+The active model is marked with `✓`. Navigation re-opens the picker instead of returning, and `Batal` cancels.
+
+### 3. Running the pipeline
+With mode ON, ask for a code change. The manager calls `orchestrate`, which returns:
+
+```text
+Stages: research -> implement -> security+QA (parallel) -> at most one fix round.
+```
+
+| Verdict | Meaning |
+|:---|:---|
+| `clean` | Both reviewers returned `clean` **and** both upstream stages succeeded. |
+| `blocked` | Blockers remain after the fix round. |
+| `fixed` | A fix round ran and succeeded. |
+| `unverified` | The pipeline could not obtain a real verdict — treat as **not** verified. |
+
+While the pipeline runs, `edit` / `write` are blocked. After a successful run, editing is unlocked until the next user turn.
+
+---
+
+<details>
+<summary><strong>Configuration Reference</strong></summary>
+
+Written to `~/.pi/agent/orchestrator.json`:
+
+```json
+{
+  "enabled": true,
+  "roles": {
+    "context": "provider/model",
+    "coder": "provider/model",
+    "security": "provider/model",
+    "qa": "provider/model"
+  },
+  "thinking": {
+    "context": "",
+    "coder": "high",
+    "security": "",
+    "qa": ""
+  }
+}
+```
+
+- **`thinking`** accepts `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, or `""` for the model default. Unknown values normalize to `""`.
+- The level is applied as a `:<level>` suffix on the child model string — `pi-subagents` treats a separate `thinking` field as watchdog-only.
+- A missing `thinking` key, a malformed value, or an unreadable config file is tolerated: defaults are used and nothing throws.
+</details>
+
+<details>
+<summary><strong>How the Delegation Bridge Works</strong></summary>
+
+`ctx.executeTool("subagent", ...)` is **not** available to extensions — `pi-subagents` registers that tool as `exposure: "model-only"`, so calling it fails with `Tool subagent not found`.
+
+This extension therefore uses the supported channel instead: an in-process event-bus RPC.
+
+| Step | Channel / Value |
+|:---|:---|
+| Request | `subagents:rpc:v1:request` with `{ version: 1, requestId, method: "spawn", params }` |
+| Reply | `subagents:rpc:v1:reply:<requestId>` |
+| Terminal event | `subagent:async-complete` |
+
+The run id is read from `reply.data.details.asyncId`. If a completion payload carries no text, a single `status` request corroborates it. No polling is used, every listener is unsubscribed on all paths, and the spawn reply has a 20-second timeout.
+</details>
+
+<details>
+<summary><strong>Operational Notes</strong></summary>
+
+- **Sleep vs. the watchdog.** `pi-subagents` enforces its child timeout against wall-clock time, including time the machine spent asleep. A laptop that idle-sleeps mid-pipeline will starve long-running children. Run long pipelines plugged in, or keep the machine awake with `caffeinate -i`.
+- **Wall-clock ceilings.** The spawn reply times out after 20 seconds; the pipeline itself is abandoned after 45 minutes. An abandoned or aborted run never sets `verified`.
+- **One writer at a time.** The coder role is the only stage allowed to modify files, and the fix round reuses that same role.
+</details>
+
+<details>
+<summary><strong>Repository Layout</strong></summary>
+
+```text
+pi-orchestrator/
+├── .gitattributes            # Enforces LF line endings across all platforms
+├── .gitignore                # Ignores runtime caches and backups
+├── README.md                 # Documentation
+├── LICENSE                   # MIT License
+├── assets/
+│   └── banner.svg            # README banner
+└── extensions/
+    └── orchestrator.ts       # /orchestrator command + orchestrate tool
+```
+</details>
+
+---
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
