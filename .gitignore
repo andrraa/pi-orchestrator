@@ -1,0 +1,8 @@
+*.cache.json
+*.log
+*.tmp
+*.bak*
+.sync-state.json
+node_modules/
+.DS_Store
+Thumbs.db
