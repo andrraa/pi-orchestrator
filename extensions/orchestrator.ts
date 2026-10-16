@@ -5,7 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Type } from "typebox";
 import { getSettingsListTheme } from "@earendil-works/pi-coding-agent";
-import { Container, Input, type SettingItem, SettingsList } from "@earendil-works/pi-tui";
+import { Container, type SettingItem, SettingsList } from "@earendil-works/pi-tui";
 
 const CONFIG_PATH = path.join(os.homedir(), ".pi", "agent", "orchestrator.json");
 
@@ -44,6 +44,28 @@ const PIPELINE_TIMEOUT_MS = 45 * 60 * 1000;
 // --- pipeline + enforcement state (module scope) ----------------------------
 let pipelineState: { verified: boolean; lastRunId?: string; unavailable?: boolean } = { verified: false };
 let modeEnabled = false;
+
+// Memoized "can we talk to pi-subagents?" answer. Undefined until probed.
+let bridgeOk: boolean | undefined;
+const PROBE_TIMEOUT_MS = 3_000;
+
+export const MISSING_DEPENDENCY =
+  "orchestrator: pi-subagents is not installed or not enabled. Run `pi install npm:pi-subagents`, then restart pi. Orchestrator mode cannot be enabled without it.";
+
+/**
+ * `pi-subagents` does not register anything we can enumerate from an extension,
+ * so the only honest probe is to speak its RPC. A reply (even an error reply)
+ * proves the bridge exists; a timeout means nothing is listening.
+ */
+function probeBridge(pi: ExtensionAPI): Promise<boolean> {
+  if (bridgeOk !== undefined) return Promise.resolve(bridgeOk);
+  return rpcRequest(pi, "status", {}, PROBE_TIMEOUT_MS).then((reply) => {
+    // An RPC-level error (unknown method, no such run) still proves the bridge
+    // is up; only "nothing answered" means pi-subagents is missing.
+    bridgeOk = !(reply.ok === false && /no reply within/i.test(reply.error ?? ""));
+    return bridgeOk;
+  });
+}
 
 function load(): Config {
   try {
@@ -98,15 +120,21 @@ function pickModel(ctx: ExtensionCommandContext, title: string, current: string)
     return Promise.resolve(undefined);
   }
   return ctx.ui.custom<string | undefined>((tui, _theme, keybindings, done) => {
-    const input = new Input({ prompt: "cari> ", placeholder: "ketik untuk memfilter" });
+    // Plain state, no Input component: pi focuses the component this factory
+    // returns, and an inner Input would never receive the keystrokes.
     let query = "";
     let filtered = all;
     let index = Math.max(0, all.indexOf(current));
+    const refilter = () => {
+      const needle = query.trim().toLowerCase();
+      filtered = needle ? all.filter((id) => id.toLowerCase().includes(needle)) : all;
+      index = Math.max(0, filtered.indexOf(current));
+    };
 
     return {
       invalidate() {},
       render(width: number) {
-        const lines = [`${title}`, "", ...input.render(width)];
+        const lines = [`${title}`, "", `  cari> ${query}`, ""];
         if (filtered.length === 0) {
           lines.push("  tidak ada model yang cocok");
         } else {
@@ -131,15 +159,12 @@ function pickModel(ctx: ExtensionCommandContext, title: string, current: string)
           index = index === filtered.length - 1 ? 0 : index + 1;
         } else if (confirm || data === "\r") {
           return done(filtered[index]);
-        } else {
-          input.handleInput(data);
-          const value = input.getValue();
-          if (value !== query) {
-            query = value;
-            const needle = query.trim().toLowerCase();
-            filtered = needle ? all.filter((id) => id.toLowerCase().includes(needle)) : all;
-            index = Math.max(0, filtered.indexOf(current));
-          }
+        } else if (keybindings.matches(data, "tui.editor.deleteCharBackward") || data === "\x7f") {
+          if (query) query = query.slice(0, -1);
+          refilter();
+        } else if (data.charCodeAt(0) >= 32 && data.charCodeAt(0) !== 0x7f) {
+          query += data;
+          refilter();
         }
         tui.requestRender();
       },
@@ -152,14 +177,21 @@ function pickModel(ctx: ExtensionCommandContext, title: string, current: string)
  * or undefined when they cancelled. Selecting a model rows does NOT change
  * anything by itself: the caller opens the picker, so the menu stays reachable.
  */
-function menuOnce(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<string | undefined> {
+function menuOnce(pi: ExtensionAPI, ctx: ExtensionCommandContext, unavailable: boolean): Promise<string | undefined> {
   const cfg = load();
   const manager = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "default";
 
   return ctx.ui.custom<string | undefined>((tui, theme, _keybindings, done) => {
     const value = (key: RoleKey) => cfg.roles[key] || "belum dipilih";
     const items: SettingItem[] = [
-      { id: ENABLED_ID, label: "Enable orchestrator", currentValue: cfg.enabled ? "ON" : "OFF", values: ["ON", "OFF"] },
+      {
+        id: ENABLED_ID,
+        label: "Enable orchestrator",
+        currentValue: cfg.enabled ? "ON" : "OFF",
+        // Without pi-subagents there is nothing to enable, so the row refuses to move.
+        values: unavailable ? ["OFF"] : ["ON", "OFF"],
+        description: unavailable ? MISSING_DEPENDENCY : undefined,
+      },
       // a one-element `values` array makes Enter fire onChange without moving focus
       { id: MANAGER_ID, label: "Manager model", currentValue: manager, values: [manager] },
       ...ROLES.map((r) => ({ id: r.key, label: r.label, currentValue: value(r.key), values: [value(r.key)], description: `${r.agent} — ${r.hint}` })),
@@ -169,7 +201,7 @@ function menuOnce(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<strin
         currentValue: cfg.thinking[r.key] || "default",
         values: THINKING_CYCLE,
       })),
-      { id: "status", label: `RPC bridge: ${pipelineState.unavailable ? "unavailable" : "ok"}`, currentValue: "", values: [""] },
+      { id: "status", label: `pi-subagents: ${unavailable ? "MISSING" : "ok"}`, currentValue: "", values: [""] },
     ];
 
     const list = new SettingsList(
@@ -178,6 +210,10 @@ function menuOnce(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<strin
       getSettingsListTheme(),
       (id, newValue) => {
         if (id === ENABLED_ID) {
+          if (newValue === "ON" && unavailable) {
+            ctx.ui.notify(MISSING_DEPENDENCY, "error");
+            return;
+          }
           cfg.enabled = newValue === "ON";
           persist(cfg);
           ctx.ui.notify(`Orchestrator mode: ${cfg.enabled ? "ON" : "OFF"}`, "info");
@@ -221,8 +257,10 @@ function menuOnce(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<strin
 
 /** Menu and picker alternate so a selection lands back in the menu, not at the prompt. */
 async function openMenu(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
+  const missing = !(await probeBridge(pi));
+  if (missing) ctx.ui.notify(MISSING_DEPENDENCY, "error");
   for (;;) {
-    const row = await menuOnce(pi, ctx);
+    const row = await menuOnce(pi, ctx, missing);
     if (row === undefined) return;
 
     if (row === MANAGER_ID) {
@@ -501,6 +539,13 @@ export default function (pi: ExtensionAPI) {
     handler: async (args, ctx) => {
       const arg = args.trim().toLowerCase();
       if (arg === "on" || arg === "off") {
+        if (arg === "on" && !(await probeBridge(pi))) {
+          const cfgOff = load();
+          cfgOff.enabled = false;
+          persist(cfgOff);
+          ctx.ui.notify(MISSING_DEPENDENCY, "error");
+          return;
+        }
         const cfg = load();
         cfg.enabled = arg === "on";
         persist(cfg);
@@ -612,6 +657,23 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("tool_call", (event) => {
     return enforcementDecision(event.toolName, event.input as Record<string, unknown>, pipelineState, { enabled: modeEnabled });
+  });
+
+  // Warn once at startup when the pipeline dependency is missing. Deferred so
+  // the probe never blocks pi's boot; it resolves on the next tick.
+  pi.on("session_start", (_event, ctx) => {
+    setTimeout(() => {
+      void probeBridge(pi).then((ok) => {
+        if (!ok) {
+          ctx.ui.notify(MISSING_DEPENDENCY, "error");
+          const cfg = load();
+          if (cfg.enabled) {
+            cfg.enabled = false;
+            persist(cfg);
+          }
+        }
+      });
+    }, 0);
   });
 
   pi.on("before_agent_start", (event) => {
