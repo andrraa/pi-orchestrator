@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 850 672" width="100%" height="100%" role="img" aria-label="How the orchestrator pipeline works">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 850 700" width="100%" height="100%" role="img" aria-label="How the orchestrator pipeline works">
 <title>How orchestration works</title>
-<rect width="850" height="672" rx="10" fill="#09090b" stroke="#27272a" stroke-width="1"/>
+<rect width="850" height="700" rx="10" fill="#09090b" stroke="#27272a" stroke-width="1"/>
 <defs><marker id="ah" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" fill="#3f3f46"/></marker></defs>
 <text x="425" y="34" text-anchor="middle" font-family="SFMono-Regular,ui-monospace,Menlo,Consolas,monospace" font-size="11" letter-spacing="2.4" fill="#71717a">HOW ORCHESTRATION WORKS</text>
 <rect x="325.0" y="56" width="200" height="36" rx="6" fill="#18181b" stroke="#a1a1aa" stroke-width="1.2"/>
@@ -47,18 +47,20 @@
 <text x="427" y="476.0" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="13" font-weight="600" fill="#2ea44f">FIX ✎  (worker)</text>
 <path d="M425,494 V530" fill="none" stroke="#3f3f46" stroke-width="1.4" marker-end="url(#ah)"/>
 <text x="434" y="516" font-family="SFMono-Regular,ui-monospace,Menlo,Consolas,monospace" font-size="9.5" fill="#71717a">report</text>
-<path d="M625,400 H760 V558 H532" fill="none" stroke="#3f3f46" stroke-width="1.4" marker-end="url(#ah)"/>
-<text x="745" y="452" text-anchor="end" font-family="SFMono-Regular,ui-monospace,Menlo,Consolas,monospace" font-size="9.5" fill="#71717a">clean</text>
-<rect x="325" y="534" width="200" height="52" rx="6" fill="#18181b" stroke="#f4f4f5" stroke-width="1.2"/>
-<rect x="325" y="535" width="3" height="50" rx="1.5" fill="#f4f4f5"/>
-<text x="427" y="555" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="13" font-weight="600" fill="#f4f4f5">MANAGER — final answer</text>
-<text x="427" y="572" font-family="middle" font-size="10" fill="#a1a1aa">clean · blocked · fixed · unverified</text>
-<rect x="40" y="596" width="370" height="42" rx="6" fill="none" stroke="#3f3f46" stroke-width="1"/>
-<text x="52" y="613" font-family="SFMono-Regular,ui-monospace,Menlo,Consolas,monospace" font-size="10" fill="#bf8700">✎ WRITE GATE</text>
-<text x="52" y="628" font-family="SFMono-Regular,ui-monospace,Menlo,Consolas,monospace" font-size="9.5" fill="#71717a">edit / write blocked while mode ON and no run verified</text>
-<text x="52" y="641" font-family="SFMono-Regular,ui-monospace,Menlo,Consolas,monospace" font-size="9.5" fill="#71717a">released after a pipeline run completes</text>
-<rect x="440" y="596" width="370" height="42" rx="6" fill="none" stroke="#3f3f46" stroke-width="1"/>
-<text x="452" y="613" font-family="SFMono-Regular,ui-monospace,Menlo,Consolas,monospace" font-size="10" fill="#0969da">pi-subagents PROBE</text>
-<text x="452" y="628" font-family="SFMono-Regular,ui-monospace,Menlo,Consolas,monospace" font-size="9.5" fill="#71717a">no bridge ⇒ mode cannot be armed</text>
-<text x="452" y="641" font-family="SFMono-Regular,ui-monospace,Menlo,Consolas,monospace" font-size="9.5" fill="#71717a">gate fails open, never wedges the session</text>
+<path d="M625,400 H790 V562 H553" fill="none" stroke="#3f3f46" stroke-width="1.4" marker-end="url(#ah)"/>
+<text x="778" y="452" text-anchor="end" font-family="SFMono-Regular,ui-monospace,Menlo,Consolas,monospace" font-size="9.5" fill="#71717a">clean</text>
+<rect x="305" y="530" width="240" height="58" rx="6" fill="#18181b" stroke="#f4f4f5" stroke-width="1.2"/>
+<rect x="305" y="531" width="3" height="56" rx="1.5" fill="#f4f4f5"/>
+<text x="425" y="553" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="13" font-weight="600" fill="#f4f4f5">MANAGER — final answer</text>
+<text x="425" y="574" text-anchor="middle" font-family="SFMono-Regular,ui-monospace,Menlo,Consolas,monospace" font-size="10" fill="#a1a1aa">clean · blocked · fixed · unverified</text>
+<rect x="40" y="612" width="370" height="60" rx="6" fill="#18181b" stroke="#bf8700" stroke-width="1.2"/>
+<rect x="40" y="613" width="3" height="58" rx="1.5" fill="#bf8700"/>
+<text x="52" y="631" font-family="SFMono-Regular,ui-monospace,Menlo,Consolas,monospace" font-size="10" fill="#bf8700">✎ WRITE GATE</text>
+<text x="52" y="646" font-family="SFMono-Regular,ui-monospace,Menlo,Consolas,monospace" font-size="9.5" fill="#71717a">edit / write blocked while mode ON and no run verified</text>
+<text x="52" y="659" font-family="SFMono-Regular,ui-monospace,Menlo,Consolas,monospace" font-size="9.5" fill="#71717a">released after a pipeline run completes</text>
+<rect x="440" y="612" width="370" height="60" rx="6" fill="#18181b" stroke="#0969da" stroke-width="1.2"/>
+<rect x="440" y="613" width="3" height="58" rx="1.5" fill="#0969da"/>
+<text x="452" y="631" font-family="SFMono-Regular,ui-monospace,Menlo,Consolas,monospace" font-size="10" fill="#0969da">pi-subagents PROBE</text>
+<text x="452" y="646" font-family="SFMono-Regular,ui-monospace,Menlo,Consolas,monospace" font-size="9.5" fill="#71717a">no bridge ⇒ mode cannot be armed</text>
+<text x="452" y="659" font-family="SFMono-Regular,ui-monospace,Menlo,Consolas,monospace" font-size="9.5" fill="#71717a">gate fails open, never wedges the session</text>
 </svg>
