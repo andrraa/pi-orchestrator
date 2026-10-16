@@ -32,6 +32,7 @@ A rule written in `AGENTS.md` is soft context: the main model may read it and st
 - **Tab-Cycling Rows:** `Tab` cycles the focused row — flip the on/off toggle or step through thinking levels without leaving the menu.
 - **Fail-Open on Misconfiguration:** A broken `pi-subagents` bridge releases the gate instead of wedging the session.
 - **Child-Process Guard:** Subagent children spawn their own Pi process; the extension detects `PI_SUBAGENT_CHILD` and stays inert there.
+- **Dependency Gate:** `pi-subagents` is required, so the extension probes the bridge and refuses to turn ON without it, warns on startup, and clears a stale `enabled: true`.
 
 ---
 
@@ -100,6 +101,23 @@ Both are declared as `peerDependencies` and are supplied by the Pi host; the pac
 
 Restart Pi after installing. No build step is required: Pi loads the TypeScript through `jiti`.
 
+### Missing dependency
+
+`pi-subagents` is not optional: without a live bridge there is nothing to delegate to, so mode cannot be armed. When the package is absent or disabled:
+
+```bash
+pi install npm:pi-subagents   # then restart pi
+```
+
+The extension detects this by speaking the bridge's RPC — any reply, including an RPC-level error, proves the bridge is listening. A probe timeout is the only signal treated as "missing". In that state:
+
+- the toggle row collapses to `OFF` and **Tab cannot turn mode ON**;
+- the status row reads `pi-subagents: MISSING`;
+- `/orchestrator` warns on open, and `/orchestrator on` is refused with the reason;
+- a session that starts with a stale `enabled: true` is force-disabled and warned once.
+
+This is a safety interlock, not decoration: a missing bridge also releases the write gate (see Enforcement Layers), so an unarmed mode is the honest state.
+
 ---
 
 ## Usage
@@ -125,7 +143,7 @@ Orchestrator
   Thinking Lead coder        default
   Thinking Security specialist  default
   Thinking QA                default
-  RPC bridge: ok
+  pi-subagents: ok
 
   Type to search · Enter/Space to change · Esc to cancel
 ```
