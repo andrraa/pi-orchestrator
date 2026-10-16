@@ -201,7 +201,7 @@ function menuOnce(pi: ExtensionAPI, ctx: ExtensionCommandContext, unavailable: b
         currentValue: cfg.thinking[r.key] || "default",
         values: THINKING_CYCLE,
       })),
-      { id: "status", label: `pi-subagents: ${unavailable ? "MISSING" : "ok"}`, currentValue: "", values: [""] },
+      { id: "status", label: "pi-subagents", currentValue: unavailable ? "MISSING" : "ok", values: [""] },
     ];
 
     const list = new SettingsList(
@@ -227,7 +227,8 @@ function menuOnce(pi: ExtensionAPI, ctx: ExtensionCommandContext, unavailable: b
         if (id === MANAGER_ID || ROLES.some((r) => r.key === id)) return done(id);
       },
       () => done(undefined),
-      { enableSearch: true },
+      // no search: the menu is a short fixed list, so the hint line is just noise
+      { enableSearch: false },
     );
     list.selectItem(ENABLED_ID);
 
