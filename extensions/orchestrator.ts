@@ -45,7 +45,9 @@ const PIPELINE_TIMEOUT_MS = 45 * 60 * 1000;
 let pipelineState: { verified: boolean; lastRunId?: string; unavailable?: boolean } = { verified: false };
 let modeEnabled = false;
 
-// Memoized "can we talk to pi-subagents?" answer. Undefined until probed.
+// Memoized positive "can we talk to pi-subagents?" answer. Undefined until a probe succeeds.
+// A negative answer is never memoized: a slow boot or a momentary delay must not
+// pin the bridge as MISSING for the rest of the pi process.
 let bridgeOk: boolean | undefined;
 const PROBE_TIMEOUT_MS = 3_000;
 
@@ -54,17 +56,38 @@ export const MISSING_DEPENDENCY =
 
 /**
  * `pi-subagents` does not register anything we can enumerate from an extension,
- * so the only honest probe is to speak its RPC. A reply (even an error reply)
- * proves the bridge exists; a timeout means nothing is listening.
+ * so the only honest probe is to speak its RPC.
+ *
+ * We probe with "ping" because pi-subagents answers it from memory, before its
+ * session-context check; "status" without a run id can instead fall through to
+ * agent discovery and wait unbounded, making a timeout look like a missing
+ * package. A reply (even an RPC-level error) proves the bridge exists; only a
+ * timeout means nothing is listening. We cache only a positive answer so one
+ * slow boot cannot pin the bridge as missing for the whole session.
  */
 function probeBridge(pi: ExtensionAPI): Promise<boolean> {
-  if (bridgeOk !== undefined) return Promise.resolve(bridgeOk);
-  return rpcRequest(pi, "status", {}, PROBE_TIMEOUT_MS).then((reply) => {
+  if (bridgeOk) return Promise.resolve(true);
+  return rpcRequest(pi, "ping", {}, PROBE_TIMEOUT_MS).then((reply) => {
     // An RPC-level error (unknown method, no such run) still proves the bridge
     // is up; only "nothing answered" means pi-subagents is missing.
-    bridgeOk = !(reply.ok === false && /no reply within/i.test(reply.error ?? ""));
-    return bridgeOk;
+    const alive = !(reply.ok === false && /no reply within/i.test(reply.error ?? ""));
+    if (alive) bridgeOk = true;
+    return alive;
   });
+}
+
+/**
+ * Probe the bridge with retries before concluding it is absent, so a slow
+ * session start is not mistaken for a missing dependency. Probes immediately,
+ * then +1s and +3s; returns false on the first success and true only when all
+ * three probes miss.
+ */
+async function bridgeConfirmedMissing(pi: ExtensionAPI): Promise<boolean> {
+  for (const waitMs of [0, 1_000, 3_000]) {
+    if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
+    if (await probeBridge(pi)) return false;
+  }
+  return true;
 }
 
 function load(): Config {
@@ -89,12 +112,23 @@ function normalizeThinking(raw: unknown): Record<RoleKey, string> {
 }
 
 function save(cfg: Config) {
-  fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2) + "\n");
+  // Atomic write: a concurrent reader never sees a torn file, which would make
+  // load() fall back to DEFAULTS (enabled: false) and clobber the operator's toggle.
+  const tmpPath = CONFIG_PATH + ".tmp";
+  fs.writeFileSync(tmpPath, JSON.stringify(cfg, null, 2) + "\n");
+  fs.renameSync(tmpPath, CONFIG_PATH);
+  modeEnabled = cfg.enabled;
 }
 
-function persist(cfg: Config) {
+/**
+ * Read-modify-write the config in one step so every mutation starts from the
+ * freshest on-disk state instead of a stale snapshot captured when a menu opened.
+ */
+function updateConfig(mutate: (cfg: Config) => void): Config {
+  const cfg = load();
+  mutate(cfg);
   save(cfg);
-  modeEnabled = cfg.enabled;
+  return cfg;
 }
 
 function modelIds(ctx: ExtensionCommandContext): string[] {
@@ -214,14 +248,16 @@ function menuOnce(pi: ExtensionAPI, ctx: ExtensionCommandContext, unavailable: b
             ctx.ui.notify(MISSING_DEPENDENCY, "error");
             return;
           }
-          cfg.enabled = newValue === "ON";
-          persist(cfg);
-          ctx.ui.notify(`Orchestrator mode: ${cfg.enabled ? "ON" : "OFF"}`, "info");
+          const updated = updateConfig((c) => {
+            c.enabled = newValue === "ON";
+          });
+          ctx.ui.notify(`Orchestrator mode: ${updated.enabled ? "ON" : "OFF"}`, "info");
           return;
         }
         if (id.startsWith("think:")) {
-          cfg.thinking[id.slice(6) as RoleKey] = newValue === "default" ? "" : newValue;
-          persist(cfg);
+          updateConfig((c) => {
+            c.thinking[id.slice(6) as RoleKey] = newValue === "default" ? "" : newValue;
+          });
           return;
         }
         if (id === MANAGER_ID || ROLES.some((r) => r.key === id)) return done(id);
@@ -282,9 +318,9 @@ async function openMenu(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise
     const key = row as RoleKey;
     const pick = await pickModel(ctx, `${role(key).label} [${role(key).agent}]`, load().roles[key]);
     if (!pick) continue;
-    const cfg = load();
-    cfg.roles[key] = pick;
-    persist(cfg);
+    updateConfig((c) => {
+      c.roles[key] = pick;
+    });
     ctx.ui.notify(`${role(key).label} → ${pick}`, "info");
   }
 }
@@ -541,16 +577,16 @@ export default function (pi: ExtensionAPI) {
       const arg = args.trim().toLowerCase();
       if (arg === "on" || arg === "off") {
         if (arg === "on" && !(await probeBridge(pi))) {
-          const cfgOff = load();
-          cfgOff.enabled = false;
-          persist(cfgOff);
+          updateConfig((c) => {
+            c.enabled = false;
+          });
           ctx.ui.notify(MISSING_DEPENDENCY, "error");
           return;
         }
-        const cfg = load();
-        cfg.enabled = arg === "on";
-        persist(cfg);
-        ctx.ui.notify(`Orchestrator mode: ${cfg.enabled ? "ON" : "OFF"}`, "info");
+        const updated = updateConfig((c) => {
+          c.enabled = arg === "on";
+        });
+        ctx.ui.notify(`Orchestrator mode: ${updated.enabled ? "ON" : "OFF"}`, "info");
         return;
       }
       if (ctx.mode !== "tui") {
@@ -664,14 +700,12 @@ export default function (pi: ExtensionAPI) {
   // the probe never blocks pi's boot; it resolves on the next tick.
   pi.on("session_start", (_event, ctx) => {
     setTimeout(() => {
-      void probeBridge(pi).then((ok) => {
-        if (!ok) {
+      void bridgeConfirmedMissing(pi).then((missing) => {
+        if (missing) {
           ctx.ui.notify(MISSING_DEPENDENCY, "error");
-          const cfg = load();
-          if (cfg.enabled) {
-            cfg.enabled = false;
-            persist(cfg);
-          }
+          updateConfig((c) => {
+            c.enabled = false;
+          });
         }
       });
     }, 0);
