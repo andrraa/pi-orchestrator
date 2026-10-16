@@ -36,6 +36,21 @@ A rule written in `AGENTS.md` is soft context: the main model may read it and st
 
 ---
 
+## How It Works
+
+![How orchestration works](assets/pipeline.svg)
+
+The manager does not run the stages itself: it calls `orchestrate(task)`, and the whole sequence executes inside the tool. Each stage's output is handed to the next, so later stages can only reason about work that actually happened.
+
+- **Stages 1-2 are sequential.** The researcher produces a brief; the coder implements from it.
+- **Stage 3 is parallel.** Both reviewers receive the same brief and run concurrently.
+- **The fix round is conditional and hardcoded to one pass.** A `blocked` verdict buys exactly one repair; there is no re-review afterwards, and no retry loop.
+- **A dead reviewer is not a clean reviewer.** A reviewer that fails or returns no verdict lands in the blocked path, and the run reports `unverified` rather than `clean`.
+
+If both reviewers pass and both upstream stages succeeded, the change was never at risk of being fixed blindly — the manager gets a `clean` verdict and answers.
+
+---
+
 ## Architecture
 
 | Role | Default Agent | Stage | Responsibility |
@@ -255,7 +270,8 @@ pi-orchestrator/
 ├── LICENSE                   # MIT License
 ├── package.json              # Pi package manifest (extensions + peer dependencies)
 ├── assets/
-│   └── banner.svg            # README banner
+│   ├── banner.svg            # README banner
+│   └── pipeline.svg          # "How It Works" diagram
 └── extensions/
     └── orchestrator.ts       # /orchestrator command + orchestrate tool
 ```
