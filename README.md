@@ -129,7 +129,7 @@ The extension detects this by speaking the bridge's RPC — any reply, including
 - the toggle row collapses to `OFF` and **Tab cannot turn mode ON**;
 - the status row reads `pi-subagents: MISSING`;
 - `/orchestrator` warns on open, and `/orchestrator on` is refused with the reason;
-- a session that starts with a stale `enabled: true` is force-disabled and warned once.
+- a session that starts with a stale `enabled: true` is force-disabled and warned once (the bridge is re-probed a few times before the mode is force-disabled, so a slow start is not mistaken for a missing package).
 
 This is a safety interlock, not decoration: a missing bridge also releases the write gate (see Enforcement Layers), so an unarmed mode is the honest state.
 
