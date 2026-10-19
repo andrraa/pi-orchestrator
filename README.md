@@ -200,10 +200,10 @@ Stages: research -> implement -> security+QA (parallel) -> at most one fix round
 |:---|:---|
 | `clean` | Both reviewers returned `clean` **and** both upstream stages succeeded. |
 | `blocked` | Blockers remain after the fix round. |
-| `fixed` | A fix round ran and succeeded. |
+| `fixed-unverified` | A fix round succeeded but has not been independently re-reviewed. |
 | `unverified` | The pipeline could not obtain a real verdict — treat as **not** verified. |
 
-While the pipeline runs, `edit` / `write` are blocked. After a successful run, editing is unlocked until the next user turn.
+While the pipeline runs, `edit` / `write` are blocked. Only an explicit clean JSON verdict with successful completion unlocks editing until the next user turn. Fixed-unverified or non-JSON completion leaves the gate closed.
 
 ---
 

@@ -478,7 +478,7 @@ return {
   qa: qa.structuredOutput ? qa.structuredOutput : qa.output,
   fix: fix ? fix.output : null,
   // "clean" only when both reviewers really returned clean and both upstream stages succeeded.
-  verdict: fix ? (fix.ok === true ? "fixed" : "unverified") : (blocked ? (securityVerdict === undefined || qaVerdict === undefined || upstream.length > 0 ? "unverified" : "blocked") : "clean")
+  verdict: fix ? (fix.ok === true ? "fixed-unverified" : "unverified") : (blocked ? (securityVerdict === undefined || qaVerdict === undefined || upstream.length > 0 ? "unverified" : "blocked") : "clean")
 };
 `.trim();
 }
@@ -692,7 +692,9 @@ export default function (pi: ExtensionAPI) {
         };
       }
 
-      const ok = completion.success;
+      let verdict: unknown;
+      try { verdict = JSON.parse(completion.text).verdict; } catch { /* Non-JSON completion is not verification evidence. */ }
+      const ok = completion.success && verdict === "clean";
       if (ok) pipelineState.verified = true;
       return {
         content: [{ type: "text" as const, text: `${completion.text}\n\n${STAGE_SUMMARY}` }],

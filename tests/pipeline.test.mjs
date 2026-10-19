@@ -28,3 +28,10 @@ test('direct bypass requires explicit operator command and resets each user turn
   assert.match(source, /pipelineState.direct = false;/);
   assert.match(source, /state.verified \|\| state.direct/);
 });
+test('successful fix is not independently verified', async () => {
+  const { result } = await simulate({ security: { structuredOutput: { verdict: 'blocked', findings: ['unsafe input'] } } });
+  assert.equal(result.verdict, 'fixed-unverified');
+});
+test('gate requires explicit clean verdict, not just process completion', () => {
+  assert.match(source, /completion.success && verdict === "clean"/);
+});
