@@ -18,6 +18,7 @@ interface Config {
   enabled: boolean;
   roles: Record<RoleKey, string>;
   thinking: Record<RoleKey, string>;
+  stages: Record<"context" | "security" | "qa", boolean>;
 }
 
 const ROLES: { key: RoleKey; label: string; agent: string; hint: string }[] = [
@@ -29,6 +30,7 @@ const ROLES: { key: RoleKey; label: string; agent: string; hint: string }[] = [
 
 const DEFAULTS: Config = {
   enabled: false,
+  stages: { context: true, security: true, qa: true },
   roles: { context: "", coder: "", security: "", qa: "" },
   thinking: { context: "", coder: "", security: "", qa: "" },
 };
@@ -94,7 +96,7 @@ async function bridgeConfirmedMissing(pi: ExtensionAPI): Promise<boolean> {
 function load(): Config {
   try {
     const raw = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"));
-    return { enabled: !!raw.enabled, roles: { ...DEFAULTS.roles, ...raw.roles }, thinking: normalizeThinking(raw.thinking) };
+    return { enabled: !!raw.enabled, roles: { ...DEFAULTS.roles, ...raw.roles }, thinking: normalizeThinking(raw.thinking), stages: { context: raw.stages?.context !== false, security: raw.stages?.security !== false, qa: raw.stages?.qa !== false } };
   } catch {
     return JSON.parse(JSON.stringify(DEFAULTS)) as Config;
   }
@@ -229,6 +231,10 @@ function menuOnce(pi: ExtensionAPI, ctx: ExtensionCommandContext, unavailable: b
       },
       // a one-element `values` array makes Enter fire onChange without moving focus
       { id: MANAGER_ID, label: "Manager model", currentValue: manager, values: [manager] },
+      ...(["context", "security", "qa"] as const).map((key) => ({
+        id: `stage:${key}`, label: `Run ${role(key).label}`,
+        currentValue: cfg.stages[key] ? "ON" : "OFF", values: ["ON", "OFF"],
+      })),
       ...ROLES.map((r) => ({ id: r.key, label: r.label, currentValue: value(r.key), values: [value(r.key)], description: `${r.agent} — ${r.hint}` })),
       ...ROLES.map((r) => ({
         id: `think:${r.key}`,
@@ -254,6 +260,10 @@ function menuOnce(pi: ExtensionAPI, ctx: ExtensionCommandContext, unavailable: b
           });
           onToggle(updated.enabled);
           ctx.ui.notify(`Orchestrator mode: ${updated.enabled ? "ON" : "OFF"}`, "info");
+          return;
+        }
+        if (id.startsWith("stage:")) {
+          updateConfig((c) => { c.stages[id.slice(6) as keyof Config["stages"]] = newValue === "ON"; });
           return;
         }
         if (id.startsWith("think:")) {
@@ -340,6 +350,7 @@ function guidelines(cfg: Config): string[] {
     `1. CONTEXT — the pipeline's agent "${role("context").agent}" (model ${model("context")}, thinking ${level("context")}) gathers the files, facts, and constraints.`,
     `2. IMPLEMENT — the pipeline's agent "${role("coder").agent}" (model ${model("coder")}, thinking ${level("coder")}) implements from that context. One writer at a time.`,
     `3. AUDIT + TEST — after the worker reports done the pipeline runs BOTH in parallel: agent "${role("security").agent}" (model ${model("security")}, thinking ${level("security")}) audits the diff, and agent "${role("qa").agent}" (model ${model("qa")}, thinking ${level("qa")}) tests and validates it.`,
+    `Enabled stages: research=${cfg.stages.context}, security=${cfg.stages.security}, QA=${cfg.stages.qa}. Coder is always required. Disabled stages do not run; report skipped checks honestly.`,
     "4. You synthesize the returned report, apply at most small final adjustments yourself, then give the final answer.",
     "While orchestrator mode is ON you may NOT edit files or launch the coder subagent directly (those tool calls are blocked) until a pipeline run has completed for this request.",
     "Read-only questions stop after stage 1. Read-only single-step tasks stay on the main session. Small low-risk edits require the operator to arm /orchestrator direct for one turn; do not self-classify edits to bypass the gate.",
@@ -427,14 +438,16 @@ function record(key, result) {
   metrics[key] = { usage, durationMs: null, runId: result.runId || null };
   return result;
 }
+const stages = args.stages || {};
+const skipped = [stages.context === false ? "research" : null, stages.security === false ? "security" : null, stages.qa === false ? "qa" : null].filter(Boolean);
 const task = args.task;
-const research = await runs.run("research", child(
+const research = stages.context === false ? { ok: true, output: "Research skipped by operator. Inspect the relevant files and constraints before editing." } : await runs.run("research", child(
   args.contextAgent,
   "Gather the files, facts, and constraints needed to change this codebase safely." + NL + NL + "TASK:" + NL + task + NL + NL + "Report every relevant file path (with line numbers where useful), the constraints, and a concrete implementation brief for the coder. Do NOT edit any files.",
   args.contextModel,
   args.thinkingContext
 ));
-record("research", research);
+if (stages.context !== false) record("research", research);
 if (research.ok !== true) return { metrics, verdict: "unverified", failedStage: "research", error: research.error || research.output || "no result", partialChanges: false };
 const implementation = await runs.run("implement", child(
   args.coderAgent,
@@ -445,7 +458,7 @@ const implementation = await runs.run("implement", child(
 record("implement", implementation);
 if (implementation.ok !== true) return { metrics, verdict: "unverified", failedStage: "implement", error: implementation.error || implementation.output || "no result", partialChanges: true };
 const reviewBrief = "TASK:" + NL + task + NL + NL + "RESEARCH SUMMARY:" + NL + research.output + NL + NL + "IMPLEMENTATION REPORT (coder):" + NL + implementation.output;
-const review = await runs.all([
+const specs = [
   withKey("security", child(
     args.securityAgent,
     reviewBrief + NL + NL + "Audit the changes just made for security defects (injection, authorization, secrets, unsafe input handling, data exposure). Cite exact file:line for each finding. Set the verdict to blocked when any defect must be fixed before shipping, otherwise clean.",
@@ -460,14 +473,16 @@ const review = await runs.all([
     args.thinkingQa,
     REVIEW_SCHEMA
   ))
-]);
-const security = record("security", review[0]);
-const qa = record("qa", review[1]);
+];
+const enabledSpecs = specs.filter(spec => stages[spec.key] !== false);
+const review = enabledSpecs.length ? await runs.all(enabledSpecs) : [];
+const security = stages.security === false ? { skipped: true } : record("security", review[enabledSpecs.findIndex(s => s.key === "security")]);
+const qa = stages.qa === false ? { skipped: true } : record("qa", review[enabledSpecs.findIndex(s => s.key === "qa")]);
 const securityVerdict = security && security.structuredOutput ? security.structuredOutput.verdict : undefined;
 const qaVerdict = qa && qa.structuredOutput ? qa.structuredOutput.verdict : undefined;
 // A failed or silent reviewer is NOT a clean reviewer: it must land in the blocked path.
-const securityClean = security && security.ok === true && securityVerdict === "clean";
-const qaClean = qa && qa.ok === true && qaVerdict === "clean";
+const securityClean = security.skipped || (security.ok === true && securityVerdict === "clean");
+const qaClean = qa.skipped || (qa.ok === true && qaVerdict === "clean");
 const stageFailure = (name, r) => r && r.ok === true ? null : name + " stage failed: " + ((r && (r.error || r.output)) || "no result");
 const upstream = [stageFailure("research", research), stageFailure("implement", implementation)].filter(Boolean);
 const blocked = upstream.length > 0 || !securityClean || !qaClean;
@@ -478,7 +493,7 @@ if (blocked) {
       security && security.structuredOutput && security.structuredOutput.findings ? security.structuredOutput.findings : [],
       qa && qa.structuredOutput && qa.structuredOutput.findings ? qa.structuredOutput.findings : []
     ),
-    [securityVerdict === undefined ? "security reviewer returned no verdict" : null, qaVerdict === undefined ? "qa reviewer returned no verdict" : null].filter(Boolean)
+    [!security.skipped && securityVerdict === undefined ? "security reviewer returned no verdict" : null, !qa.skipped && qaVerdict === undefined ? "qa reviewer returned no verdict" : null].filter(Boolean)
   );
   fix = await runs.run("fix", child(
     args.coderAgent,
@@ -490,13 +505,14 @@ if (blocked) {
 }
 return {
   metrics,
+  skipped,
   research: { artifacts: research.artifactPaths || [], outputReference: research.outputReference || null },
   implementation: { artifacts: implementation.artifactPaths || [], outputReference: implementation.outputReference || null },
-  security: security.structuredOutput ? security.structuredOutput : security.output,
-  qa: qa.structuredOutput ? qa.structuredOutput : qa.output,
+  security: security.skipped ? { skipped: true } : security.structuredOutput ? security.structuredOutput : security.output,
+  qa: qa.skipped ? { skipped: true } : qa.structuredOutput ? qa.structuredOutput : qa.output,
   fix: fix ? fix.output : null,
   // "clean" only when both reviewers really returned clean and both upstream stages succeeded.
-  verdict: fix ? (fix.ok === true ? "fixed-unverified" : "unverified") : (blocked ? (securityVerdict === undefined || qaVerdict === undefined || upstream.length > 0 ? "unverified" : "blocked") : "clean")
+  verdict: fix ? (fix.ok === true ? "fixed-unverified" : "unverified") : (blocked ? (securityVerdict === undefined || qaVerdict === undefined || upstream.length > 0 ? "unverified" : "blocked") : (security.skipped || qa.skipped ? "completed-with-skips" : "clean"))
 };
 `.trim();
 }
@@ -588,7 +604,7 @@ function waitForCompletion(
   });
 }
 
-const STAGE_SUMMARY = "Stages: research -> implement -> security+QA (parallel) -> at most one fix round.";
+const STAGE_SUMMARY = "Stages follow the operator toggles; inspect skipped checks and verdict in the report.";
 
 export default function (pi: ExtensionAPI) {
   if (process.env.PI_SUBAGENT_CHILD === "1") return;
@@ -672,6 +688,7 @@ export default function (pi: ExtensionAPI) {
         const roleAgent = (k: RoleKey) => role(k).agent;
         const args = {
           task: params.task,
+          stages: cfg.stages,
           contextAgent: roleAgent("context"),
           contextModel: cfg.roles.context,
           thinkingContext: cfg.thinking.context,
@@ -737,8 +754,8 @@ export default function (pi: ExtensionAPI) {
 
         let verdict: unknown;
         try { verdict = JSON.parse(completion.text).verdict; } catch { /* Non-JSON completion is not verification evidence. */ }
-        const ok = completion.success && verdict === "clean" && !controller.signal.aborted && load().enabled;
-        if (ok) pipelineState.verified = true;
+        const ok = completion.success && (verdict === "clean" || verdict === "completed-with-skips") && !controller.signal.aborted && load().enabled;
+        if (ok) pipelineState.verified = true; // Acceptance follows operator-selected checks, not a claim of full review.
         return {
           content: [{ type: "text" as const, text: `${completion.text}\n\n${STAGE_SUMMARY}` }],
           details: { runId, ok },

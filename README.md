@@ -203,7 +203,7 @@ Stages: research -> implement -> security+QA (parallel) -> at most one fix round
 | `fixed-unverified` | A fix round succeeded but has not been independently re-reviewed. |
 | `unverified` | The pipeline could not obtain a real verdict — treat as **not** verified. |
 
-While the pipeline runs, `edit` / `write` are blocked. Only an explicit clean JSON verdict with successful completion unlocks editing until the next user turn. Fixed-unverified or non-JSON completion leaves the gate closed.
+While the pipeline runs, `edit` / `write` are blocked. An explicit clean or completed-with-skips JSON verdict with successful completion unlocks editing until the next user turn. Fixed-unverified or non-JSON completion leaves the gate closed.
 
 ---
 
@@ -327,3 +327,22 @@ in an otherwise idle session. No unrelated workflows are stopped.
 
 Run regression checks with Node 22.13+:
 `node --test tests/*.test.mjs` (Node's TypeScript-strip warning is expected).
+
+### Optional roles
+`/orchestrator` now has independent **Run Context engine**, **Run Security specialist**,
+and **Run QA** ON/OFF rows (Tab or Enter). Lead coder is always required. The model
+and thinking settings are retained while a role is OFF. Existing configurations
+keep all three stages ON; the saved `stages` object uses `context`, `security`, and
+`qa` booleans. Only explicit `false` disables a stage.
+
+Research OFF makes the coder inspect the relevant files itself. Security and QA
+run only when enabled, in parallel when both are enabled. Turning all three OFF
+runs only the coder. Toggles are captured at pipeline launch; changes apply to the
+next run, not children already running. Use the master OFF to cancel a current run.
+
+Reports list `skipped` stages. A successful run with either reviewer OFF returns
+`completed-with-skips`, not `clean`, and releases the manager edit gate according
+to the operator's chosen checks. This does **not** claim full independent review.
+A failed enabled reviewer still triggers at most one fix; fixes remain
+`fixed-unverified` and do not release the gate. Missing/failed enabled checks never
+count as deliberately skipped checks.
