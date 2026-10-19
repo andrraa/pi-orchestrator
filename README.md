@@ -302,3 +302,10 @@ user turn only; the next user turn is gated again. The model must not use it for
 authentication, data changes, migrations or complex logic. This is an operator
 permission, not an automatic risk classifier or security sandbox. `/orchestrator off`
 remains the persistent opt-out. Read-only lookups do not need either command.
+
+### Usage visibility
+The report includes per-stage `metrics`, summed from the bridge's real
+`results[].usage`: input/output/cache tokens, cost and turns, plus child run id.
+Missing fields are `null`, not zero. `durationMs` is currently `null`: the installed
+bridge exposes timing in its workflow trace, not child results. Inspect the run
+trace for timings; the extension does not invent a duration or estimated bill.

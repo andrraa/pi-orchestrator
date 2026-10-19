@@ -413,6 +413,19 @@ const REVIEW_SCHEMA = {
   required: ["verdict", "findings"],
   additionalProperties: false
 };
+const metrics = {};
+function record(key, result) {
+  const rows = result.results || [];
+  const fields = ["input", "output", "cacheRead", "cacheWrite", "cost", "turns"];
+  const usage = {};
+  for (const field of fields) {
+    usage[field] = rows.length > 0 && rows.every(r => r.usage && Number.isFinite(r.usage[field]))
+      ? rows.reduce((sum, r) => sum + r.usage[field], 0) : null;
+  }
+  // Child results do not expose duration; workflow trace owns it. Do not invent it.
+  metrics[key] = { usage, durationMs: null, runId: result.runId || null };
+  return result;
+}
 const task = args.task;
 const research = await runs.run("research", child(
   args.contextAgent,
@@ -420,14 +433,16 @@ const research = await runs.run("research", child(
   args.contextModel,
   args.thinkingContext
 ));
-if (research.ok !== true) return { verdict: "unverified", failedStage: "research", error: research.error || research.output || "no result", partialChanges: false };
+record("research", research);
+if (research.ok !== true) return { metrics, verdict: "unverified", failedStage: "research", error: research.error || research.output || "no result", partialChanges: false };
 const implementation = await runs.run("implement", child(
   args.coderAgent,
   "Make the requested change in the current working directory." + NL + NL + "TASK:" + NL + task + NL + NL + "RESEARCH (from the context stage):" + NL + research.output + NL + NL + "Edit the files yourself, run the focused tests, and report exactly which files changed and the test results.",
   args.coderModel,
   args.thinkingCoder
 ));
-if (implementation.ok !== true) return { verdict: "unverified", failedStage: "implement", error: implementation.error || implementation.output || "no result", partialChanges: true };
+record("implement", implementation);
+if (implementation.ok !== true) return { metrics, verdict: "unverified", failedStage: "implement", error: implementation.error || implementation.output || "no result", partialChanges: true };
 const reviewBrief = "TASK:" + NL + task + NL + NL + "RESEARCH SUMMARY:" + NL + research.output + NL + NL + "IMPLEMENTATION REPORT (coder):" + NL + implementation.output;
 const review = await runs.all([
   withKey("security", child(
@@ -445,8 +460,8 @@ const review = await runs.all([
     REVIEW_SCHEMA
   ))
 ]);
-const security = review[0];
-const qa = review[1];
+const security = record("security", review[0]);
+const qa = record("qa", review[1]);
 const securityVerdict = security && security.structuredOutput ? security.structuredOutput.verdict : undefined;
 const qaVerdict = qa && qa.structuredOutput ? qa.structuredOutput.verdict : undefined;
 // A failed or silent reviewer is NOT a clean reviewer: it must land in the blocked path.
@@ -470,8 +485,10 @@ if (blocked) {
     args.coderModel,
     args.thinkingCoder
   ));
+  record("fix", fix);
 }
 return {
+  metrics,
   research: { artifacts: research.artifactPaths || [], outputReference: research.outputReference || null },
   implementation: { artifacts: implementation.artifactPaths || [], outputReference: implementation.outputReference || null },
   security: security.structuredOutput ? security.structuredOutput : security.output,

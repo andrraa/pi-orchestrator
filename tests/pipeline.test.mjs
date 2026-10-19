@@ -35,3 +35,11 @@ test('successful fix is not independently verified', async () => {
 test('gate requires explicit clean verdict, not just process completion', () => {
   assert.match(source, /completion.success && verdict === "clean"/);
 });
+test('usage comes from runtime rows and missing values remain unknown', async () => {
+  const usage = { input: 10, output: 4, cacheRead: 2, cacheWrite: 0, cost: 0.01, turns: 1 };
+  const { result } = await simulate({ research: { results: [{ usage }, { usage }] } });
+  assert.equal(result.metrics.research.usage.input, 20);
+  assert.equal(result.metrics.research.usage.cost, 0.02);
+  assert.equal(result.metrics.qa.usage.input, null);
+  assert.equal(result.metrics.qa.durationMs, null);
+});
