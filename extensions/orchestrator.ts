@@ -418,12 +418,14 @@ const research = await runs.run("research", child(
   args.contextModel,
   args.thinkingContext
 ));
+if (research.ok !== true) return { verdict: "unverified", failedStage: "research", error: research.error || research.output || "no result", partialChanges: false };
 const implementation = await runs.run("implement", child(
   args.coderAgent,
   "Make the requested change in the current working directory." + NL + NL + "TASK:" + NL + task + NL + NL + "RESEARCH (from the context stage):" + NL + research.output + NL + NL + "Edit the files yourself, run the focused tests, and report exactly which files changed and the test results.",
   args.coderModel,
   args.thinkingCoder
 ));
+if (implementation.ok !== true) return { verdict: "unverified", failedStage: "implement", error: implementation.error || implementation.output || "no result", partialChanges: true };
 const reviewBrief = "TASK:" + NL + task + NL + NL + "RESEARCH SUMMARY:" + NL + research.output + NL + NL + "IMPLEMENTATION REPORT (coder):" + NL + implementation.output;
 const review = await runs.all([
   withKey("security", child(

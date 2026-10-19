@@ -282,3 +282,8 @@ pi-orchestrator/
 ## License
 
 This project is licensed under the [MIT License](LICENSE).
+
+### Failure handling
+Research and implementation failures stop the pipeline immediately. Implementation
+failure may leave partial file changes: inspect the working tree before retrying.
+Infrastructure failures do not trigger reviewers or an automatic code-fix round.
