@@ -115,7 +115,7 @@ function normalizeThinking(raw: unknown): Record<RoleKey, string> {
 function save(cfg: Config) {
   // Atomic write: a concurrent reader never sees a torn file, which would make
   // load() fall back to DEFAULTS (enabled: false) and clobber the operator's toggle.
-  const tmpPath = CONFIG_PATH + ".tmp";
+  const tmpPath = CONFIG_PATH + "." + randomUUID() + ".tmp";
   fs.writeFileSync(tmpPath, JSON.stringify(cfg, null, 2) + "\n");
   fs.renameSync(tmpPath, CONFIG_PATH);
   modeEnabled = cfg.enabled;
@@ -212,7 +212,7 @@ function pickModel(ctx: ExtensionCommandContext, title: string, current: string)
  * or undefined when they cancelled. Selecting a model rows does NOT change
  * anything by itself: the caller opens the picker, so the menu stays reachable.
  */
-function menuOnce(pi: ExtensionAPI, ctx: ExtensionCommandContext, unavailable: boolean): Promise<string | undefined> {
+function menuOnce(pi: ExtensionAPI, ctx: ExtensionCommandContext, unavailable: boolean, onToggle: (enabled: boolean) => void): Promise<string | undefined> {
   const cfg = load();
   const manager = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "default";
 
@@ -252,6 +252,7 @@ function menuOnce(pi: ExtensionAPI, ctx: ExtensionCommandContext, unavailable: b
           const updated = updateConfig((c) => {
             c.enabled = newValue === "ON";
           });
+          onToggle(updated.enabled);
           ctx.ui.notify(`Orchestrator mode: ${updated.enabled ? "ON" : "OFF"}`, "info");
           return;
         }
@@ -294,11 +295,11 @@ function menuOnce(pi: ExtensionAPI, ctx: ExtensionCommandContext, unavailable: b
 }
 
 /** Menu and picker alternate so a selection lands back in the menu, not at the prompt. */
-async function openMenu(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
+async function openMenu(pi: ExtensionAPI, ctx: ExtensionCommandContext, onToggle: (enabled: boolean) => void): Promise<void> {
   const missing = !(await probeBridge(pi));
   if (missing) ctx.ui.notify(MISSING_DEPENDENCY, "error");
   for (;;) {
-    const row = await menuOnce(pi, ctx, missing);
+    const row = await menuOnce(pi, ctx, missing, onToggle);
     if (row === undefined) return;
 
     if (row === MANAGER_ID) {
@@ -590,6 +591,14 @@ function waitForCompletion(
 const STAGE_SUMMARY = "Stages: research -> implement -> security+QA (parallel) -> at most one fix round.";
 
 export default function (pi: ExtensionAPI) {
+  if (process.env.PI_SUBAGENT_CHILD === "1") return;
+  const activeRuns = new Set<AbortController>();
+  const cancelActiveRuns = () => {
+    for (const controller of activeRuns) controller.abort();
+    pipelineState.verified = false;
+    pipelineState.direct = false;
+    directNextTurn = false;
+  };
   modeEnabled = load().enabled;
 
   pi.registerCommand("orchestrator", {
@@ -603,15 +612,14 @@ export default function (pi: ExtensionAPI) {
       }
       if (arg === "on" || arg === "off") {
         if (arg === "on" && !(await probeBridge(pi))) {
-          updateConfig((c) => {
-            c.enabled = false;
-          });
           ctx.ui.notify(MISSING_DEPENDENCY, "error");
           return;
         }
         const updated = updateConfig((c) => {
           c.enabled = arg === "on";
         });
+        if (!updated.enabled) cancelActiveRuns();
+        else pipelineState.unavailable = false;
         ctx.ui.notify(`Orchestrator mode: ${updated.enabled ? "ON" : "OFF"}`, "info");
         return;
       }
@@ -619,7 +627,10 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.notify("/orchestrator needs TUI mode", "error");
         return;
       }
-      await openMenu(pi, ctx);
+      await openMenu(pi, ctx, (enabled) => {
+        if (!enabled) cancelActiveRuns();
+        else pipelineState.unavailable = false;
+      });
     },
   });
 
@@ -645,84 +656,107 @@ export default function (pi: ExtensionAPI) {
       }
 
       const cfg = load();
-      const roleAgent = (k: RoleKey) => role(k).agent;
-      const args = {
-        task: params.task,
-        contextAgent: roleAgent("context"),
-        contextModel: cfg.roles.context,
-        thinkingContext: cfg.thinking.context,
-        coderAgent: roleAgent("coder"),
-        coderModel: cfg.roles.coder,
-        thinkingCoder: cfg.thinking.coder,
-        securityAgent: roleAgent("security"),
-        securityModel: cfg.roles.security,
-        thinkingSecurity: cfg.thinking.security,
-        qaAgent: roleAgent("qa"),
-        qaModel: cfg.roles.qa,
-        thinkingQa: cfg.thinking.qa,
+      if (!cfg.enabled || signal?.aborted) return {
+        content: [{ type: "text" as const, text: "Orchestrator is OFF or this request was aborted; no workflow started." }],
+        details: { ok: false }, isError: true,
       };
-
-      const spawn = await rpcRequest(pi, "spawn", { script: buildPipelineScript(), args, cwd: ctx.cwd }, SPAWN_TIMEOUT_MS);
-      if (!spawn.ok) {
-        pipelineState.unavailable = true;
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `The pi-subagents RPC bridge is unavailable, so the orchestrate pipeline cannot start (${spawn.error}). Check that pi-subagents is installed and enabled; file edits are no longer blocked for this session.`,
-            },
-          ],
-          details: { runId: undefined, ok: false },
-          isError: true,
-        };
-      }
-
-      const spawnDetails = (spawn.data?.details ?? {}) as { asyncId?: string; runId?: string };
-      const runId = spawnDetails.asyncId || spawnDetails.runId;
-      if (!runId) {
-        pipelineState.unavailable = true;
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: "pi-subagents accepted the pipeline but returned no run id; the orchestrate pipeline cannot be tracked. File edits are no longer blocked for this session.",
-            },
-          ],
-          details: { runId: undefined, ok: false },
-          isError: true,
-        };
-      }
-
-      pipelineState.lastRunId = runId;
-      const completion = await waitForCompletion(pi, runId, signal, PIPELINE_TIMEOUT_MS);
-
-      if (completion.status !== "completed") {
-        const why = completion.status === "aborted" ? "was aborted" : "is still running";
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `The orchestrate pipeline ${why} (run id ${runId}). Inspect it with the subagent status action (subagent { action: "status", id: "${runId}" }).`,
-            },
-          ],
-          details: { runId, ok: false },
-        };
-      }
-
-      let verdict: unknown;
-      try { verdict = JSON.parse(completion.text).verdict; } catch { /* Non-JSON completion is not verification evidence. */ }
-      const ok = completion.success && verdict === "clean";
-      if (ok) pipelineState.verified = true;
-      return {
-        content: [{ type: "text" as const, text: `${completion.text}\n\n${STAGE_SUMMARY}` }],
-        details: { runId, ok },
+      if (activeRuns.size) return {
+        content: [{ type: "text" as const, text: "An orchestrator run is already active in this session. Stop it before starting another writer." }],
+        details: { ok: false }, isError: true,
       };
+      const controller = new AbortController();
+      const abort = () => controller.abort();
+      signal?.addEventListener("abort", abort, { once: true });
+      activeRuns.add(controller);
+      try {
+        const roleAgent = (k: RoleKey) => role(k).agent;
+        const args = {
+          task: params.task,
+          contextAgent: roleAgent("context"),
+          contextModel: cfg.roles.context,
+          thinkingContext: cfg.thinking.context,
+          coderAgent: roleAgent("coder"),
+          coderModel: cfg.roles.coder,
+          thinkingCoder: cfg.thinking.coder,
+          securityAgent: roleAgent("security"),
+          securityModel: cfg.roles.security,
+          thinkingSecurity: cfg.thinking.security,
+          qaAgent: roleAgent("qa"),
+          qaModel: cfg.roles.qa,
+          thinkingQa: cfg.thinking.qa,
+        };
+
+        const spawn = await rpcRequest(pi, "spawn", { script: buildPipelineScript(), args, cwd: ctx.cwd }, SPAWN_TIMEOUT_MS);
+        if (!spawn.ok) {
+          pipelineState.unavailable = true;
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `The pi-subagents RPC bridge is unavailable, so the orchestrate pipeline cannot start (${spawn.error}). Check that pi-subagents is installed and enabled; file edits are no longer blocked for this session.`,
+              },
+            ],
+            details: { runId: undefined, ok: false },
+            isError: true,
+          };
+        }
+
+        const spawnDetails = (spawn.data?.details ?? {}) as { asyncId?: string; runId?: string };
+        const runId = spawnDetails.asyncId || spawnDetails.runId;
+        if (!runId) {
+          pipelineState.unavailable = true;
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: "pi-subagents accepted the pipeline but returned no run id; the orchestrate pipeline cannot be tracked. File edits are no longer blocked for this session.",
+              },
+            ],
+            details: { runId: undefined, ok: false },
+            isError: true,
+          };
+        }
+
+        pipelineState.lastRunId = runId;
+        if (!load().enabled) controller.abort();
+        const completion = await waitForCompletion(pi, runId, controller.signal, PIPELINE_TIMEOUT_MS);
+
+        if (completion.status !== "completed") {
+          const stop = await rpcRequest(pi, "stop", { id: runId }, SPAWN_TIMEOUT_MS);
+          const why = stop.ok ? "received a stop request" : "could not be stopped: " + stop.error;
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `The orchestrate pipeline ${why} (run id ${runId}). Inspect it with the subagent status action (subagent { action: "status", id: "${runId}" }).`,
+              },
+            ],
+            details: { runId, ok: false },
+          };
+        }
+
+        let verdict: unknown;
+        try { verdict = JSON.parse(completion.text).verdict; } catch { /* Non-JSON completion is not verification evidence. */ }
+        const ok = completion.success && verdict === "clean" && !controller.signal.aborted && load().enabled;
+        if (ok) pipelineState.verified = true;
+        return {
+          content: [{ type: "text" as const, text: `${completion.text}\n\n${STAGE_SUMMARY}` }],
+          details: { runId, ok },
+        };
+      } finally {
+        activeRuns.delete(controller);
+        signal?.removeEventListener("abort", abort);
+      }
     },
   });
 
   pi.on("tool_call", (event) => {
+    modeEnabled = load().enabled;
+    if (!modeEnabled) cancelActiveRuns();
     return enforcementDecision(event.toolName, event.input as Record<string, unknown>, pipelineState, { enabled: modeEnabled });
   });
+
+  pi.on("session_shutdown", () => cancelActiveRuns());
 
   // Warn once at startup when the pipeline dependency is missing. Deferred so
   // the probe never blocks pi's boot; it resolves on the next tick.
@@ -731,9 +765,7 @@ export default function (pi: ExtensionAPI) {
       void bridgeConfirmedMissing(pi).then((missing) => {
         if (missing) {
           ctx.ui.notify(MISSING_DEPENDENCY, "error");
-          updateConfig((c) => {
-            c.enabled = false;
-          });
+          pipelineState.unavailable = true;
         }
       });
     }, 0);
@@ -749,8 +781,7 @@ export default function (pi: ExtensionAPI) {
     const direct = directNextTurn;
     directNextTurn = false;
     pipelineState.direct = false;
-    pipelineState.lastRunId = undefined;
-    if (!cfg.enabled) return;
+    if (!cfg.enabled) { cancelActiveRuns(); return; }
     if (direct) {
       pipelineState.direct = true;
       event.systemPromptOptions.promptGuidelines.push("The operator explicitly armed /orchestrator direct for this turn. Handle only a small low-risk change directly; for auth, data, migrations or complex changes call orchestrate instead. State why the direct path is appropriate.");

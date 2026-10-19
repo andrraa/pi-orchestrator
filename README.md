@@ -32,7 +32,7 @@ A rule written in `AGENTS.md` is soft context: the main model may read it and st
 - **Tab-Cycling Rows:** `Tab` cycles the focused row — flip the on/off toggle or step through thinking levels without leaving the menu.
 - **Fail-Open on Misconfiguration:** A broken `pi-subagents` bridge releases the gate instead of wedging the session.
 - **Child-Process Guard:** Subagent children spawn their own Pi process; the extension detects `PI_SUBAGENT_CHILD` and stays inert there.
-- **Dependency Gate:** `pi-subagents` is required, so the extension probes the bridge and refuses to turn ON without it, warns on startup, and clears a stale `enabled: true`.
+- **Dependency Gate:** `pi-subagents` is required, so the extension probes the bridge and refuses to turn ON without it, warns on startup, without changing the saved operator preference.
 
 ---
 
@@ -129,7 +129,7 @@ The extension detects this by speaking the bridge's RPC — any reply, including
 - the toggle row collapses to `OFF` and **Tab cannot turn mode ON**;
 - the status row reads `pi-subagents: MISSING`;
 - `/orchestrator` warns on open, and `/orchestrator on` is refused with the reason;
-- a session that starts with a stale `enabled: true` is force-disabled and warned once (the bridge is re-probed a few times before the mode is force-disabled, so a slow start is not mistaken for a missing package).
+- a session with saved `enabled: true` is warned if the bridge is missing; its saved preference is never overwritten by a background probe.
 
 This is a safety interlock, not decoration: a missing bridge also releases the write gate (see Enforcement Layers), so an unarmed mode is the honest state.
 
@@ -255,7 +255,7 @@ The run id is read from `reply.data.details.asyncId`. If a completion payload ca
 <summary><strong>Operational Notes</strong></summary>
 
 - **Sleep vs. the watchdog.** `pi-subagents` enforces its child timeout against wall-clock time, including time the machine spent asleep. A laptop that idle-sleeps mid-pipeline will starve long-running children. Run long pipelines plugged in, or keep the machine awake with `caffeinate -i`.
-- **Wall-clock ceilings.** The spawn reply times out after 20 seconds; the pipeline itself is abandoned after 45 minutes. An abandoned or aborted run never sets `verified`.
+- **Wall-clock ceilings.** The spawn reply times out after 20 seconds; the pipeline itself is abandoned after 45 minutes. A timed-out or aborted run receives an RPC stop request and never sets `verified`.
 - **One writer at a time.** The coder role is the only stage allowed to modify files, and the fix round reuses that same role.
 </details>
 
@@ -309,3 +309,21 @@ The report includes per-stage `metrics`, summed from the bridge's real
 Missing fields are `null`, not zero. `durationMs` is currently `null`: the installed
 bridge exposes timing in its workflow trace, not child results. Inspect the run
 trace for timings; the extension does not invent a duration or estimated bill.
+
+### Toggle and cancellation lifecycle
+The saved toggle is global across Pi sessions. Only explicit operator changes write
+it; background dependency probes never turn it OFF. Child processes register no
+orchestrator tools, commands or startup probes. Each tool boundary reads the current
+saved toggle rather than relying on an old in-memory value. Concurrent config writes
+use unique temporary files (last completed write wins).
+
+OFF rejects new pipeline calls and cancels active runs owned by this extension in
+this session, from either the command or menu. Abort and pipeline timeout also send
+`stop` to the bridge using the exact owned run id. A failed stop reports the run id
+for manual inspection; a stop acknowledgement is not proof that all processes have
+already exited. Shutdown requests cancellation on a best-effort basis. A toggle
+changed in another session is observed at the next tool/user boundary, not instantly
+in an otherwise idle session. No unrelated workflows are stopped.
+
+Run regression checks with Node 22.13+:
+`node --test tests/*.test.mjs` (Node's TypeScript-strip warning is expected).
