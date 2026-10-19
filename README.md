@@ -294,3 +294,11 @@ Full source and passing logs should not be copied between agents; detailed logs
 belong in files cited by path. The final report references research/implementation
 artifacts instead of repeating their briefs. This is a prompt target, not lossy
 character truncation; reviewer findings and fix evidence remain visible.
+
+### Small changes without four agents
+Run `/orchestrator direct`, then send one small low-risk edit request (for example,
+a label or comment correction). This explicitly releases the write gate for that
+user turn only; the next user turn is gated again. The model must not use it for
+authentication, data changes, migrations or complex logic. This is an operator
+permission, not an automatic risk classifier or security sandbox. `/orchestrator off`
+remains the persistent opt-out. Read-only lookups do not need either command.

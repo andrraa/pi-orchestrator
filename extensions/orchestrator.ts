@@ -42,8 +42,9 @@ const SPAWN_TIMEOUT_MS = 20_000;
 const PIPELINE_TIMEOUT_MS = 45 * 60 * 1000;
 
 // --- pipeline + enforcement state (module scope) ----------------------------
-let pipelineState: { verified: boolean; lastRunId?: string; unavailable?: boolean } = { verified: false };
+let pipelineState: { verified: boolean; lastRunId?: string; unavailable?: boolean; direct?: boolean } = { verified: false };
 let modeEnabled = false;
+let directNextTurn = false;
 
 // Memoized positive "can we talk to pi-subagents?" answer. Undefined until a probe succeeds.
 // A negative answer is never memoized: a slow boot or a momentary delay must not
@@ -340,7 +341,7 @@ function guidelines(cfg: Config): string[] {
     `3. AUDIT + TEST — after the worker reports done the pipeline runs BOTH in parallel: agent "${role("security").agent}" (model ${model("security")}, thinking ${level("security")}) audits the diff, and agent "${role("qa").agent}" (model ${model("qa")}, thinking ${level("qa")}) tests and validates it.`,
     "4. You synthesize the returned report, apply at most small final adjustments yourself, then give the final answer.",
     "While orchestrator mode is ON you may NOT edit files or launch the coder subagent directly (those tool calls are blocked) until a pipeline run has completed for this request.",
-    "Read-only questions stop after stage 1. Trivial single-step tasks (one command, one lookup) stay on the main session.",
+    "Read-only questions stop after stage 1. Read-only single-step tasks stay on the main session. Small low-risk edits require the operator to arm /orchestrator direct for one turn; do not self-classify edits to bypass the gate.",
     "If you keep a code-change request on yourself instead of running the flow, say why in one line.",
   ];
 }
@@ -352,13 +353,13 @@ function guidelines(cfg: Config): string[] {
 export function enforcementDecision(
   toolName: string,
   input: Record<string, unknown>,
-  state: { verified: boolean; unavailable?: boolean },
+  state: { verified: boolean; unavailable?: boolean; direct?: boolean },
   cfg: Pick<Config, "enabled">,
 ): { block: true; reason: string } | undefined {
   if (!cfg.enabled) return undefined;
   if (process.env.PI_SUBAGENT_CHILD === "1") return undefined;
   if (state.unavailable) return undefined; // fail open: a broken pi-subagents install must not wedge the session
-  if (state.verified) return undefined;
+  if (state.verified || state.direct) return undefined;
   if (toolName === "edit" || toolName === "write") {
     return {
       block: true,
@@ -578,6 +579,11 @@ export default function (pi: ExtensionAPI) {
     description: "pi-subagents orchestrator: toggle on/off, pick a model and thinking level per role",
     handler: async (args, ctx) => {
       const arg = args.trim().toLowerCase();
+      if (arg === "direct") {
+        directNextTurn = true;
+        ctx.ui.notify("Direct editing armed for the next user turn only. Use for small, low-risk changes; auth, data, migrations and complex changes still need the pipeline.", "info");
+        return;
+      }
       if (arg === "on" || arg === "off") {
         if (arg === "on" && !(await probeBridge(pi))) {
           updateConfig((c) => {
@@ -721,8 +727,16 @@ export default function (pi: ExtensionAPI) {
     const cfg = load();
     modeEnabled = cfg.enabled;
     pipelineState.verified = false;
+    const direct = directNextTurn;
+    directNextTurn = false;
+    pipelineState.direct = false;
     pipelineState.lastRunId = undefined;
     if (!cfg.enabled) return;
+    if (direct) {
+      pipelineState.direct = true;
+      event.systemPromptOptions.promptGuidelines.push("The operator explicitly armed /orchestrator direct for this turn. Handle only a small low-risk change directly; for auth, data, migrations or complex changes call orchestrate instead. State why the direct path is appropriate.");
+      return;
+    }
     for (const line of guidelines(cfg)) event.systemPromptOptions.promptGuidelines.push(line);
   });
 }
