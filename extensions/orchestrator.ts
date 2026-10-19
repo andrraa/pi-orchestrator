@@ -395,6 +395,7 @@ function child(agent, task, model, level, schema) {
   const m = withThinking(model, level);
   if (m) spec.model = m;
   if (schema) spec.outputSchema = schema;
+  spec.task += NL + NL + "Keep the handoff concise (target 500 words; exceed only for essential correctness evidence). Use file paths and decisions, not copied source or full logs. Preserve detailed logs in a file and cite its path; include failing command, exit status and relevant error excerpt. Never omit a blocker to meet the target.";
   return spec;
 }
 function withKey(key, spec) {
@@ -470,8 +471,8 @@ if (blocked) {
   ));
 }
 return {
-  research: research.output,
-  implementation: implementation.output,
+  research: { artifacts: research.artifactPaths || [], outputReference: research.outputReference || null },
+  implementation: { artifacts: implementation.artifactPaths || [], outputReference: implementation.outputReference || null },
   security: security.structuredOutput ? security.structuredOutput : security.output,
   qa: qa.structuredOutput ? qa.structuredOutput : qa.output,
   fix: fix ? fix.output : null,

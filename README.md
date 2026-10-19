@@ -287,3 +287,10 @@ This project is licensed under the [MIT License](LICENSE).
 Research and implementation failures stop the pipeline immediately. Implementation
 failure may leave partial file changes: inspect the working tree before retrying.
 Infrastructure failures do not trigger reviewers or an automatic code-fix round.
+
+### Concise handoffs
+Stage prompts target 500 words, with exceptions for essential correctness evidence.
+Full source and passing logs should not be copied between agents; detailed logs
+belong in files cited by path. The final report references research/implementation
+artifacts instead of repeating their briefs. This is a prompt target, not lossy
+character truncation; reviewer findings and fix evidence remain visible.
