@@ -113,6 +113,7 @@ test('default model and thinking arguments are omitted and context uses scout', 
   await new Promise(resolve => setImmediate(resolve));
   const args = app.requests.find(r => r.method === 'spawn').params.args;
   assert.equal(args.contextAgent, 'scout');
+  assert.equal(args.qaAgent, 'oracle');
   assert.ok(!Object.values(args).includes(''));
   controller.abort();
   await pending;

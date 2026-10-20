@@ -59,7 +59,7 @@ If both reviewers pass and both upstream stages succeeded, the change was never 
 | **Context engine** | `scout` | 1 | Gathers the files, facts, and constraints. Read-only. |
 | **Lead coder** | `worker` | 2 | Implements from that context. The only writer. |
 | **Security specialist** | `reviewer` | 3 | Audits the diff for injection, authorization, secrets, and unsafe input handling. |
-| **QA** | `reviewer` | 3 | Runs the tests and reports pass/fail evidence. |
+| **QA** | `oracle` | 3 | Runs the tests and reports pass/fail evidence. Needs an exec-capable agent (`bash`); a read-only reviewer can only inspect, so it would return `blocked` for the unverified re-run. |
 
 Stages 3 run **in parallel**; concrete blockers from valid reviewers buy at most one fix round before the final answer.
 

@@ -24,7 +24,7 @@ const ROLES: { key: RoleKey; label: string; agent: string; hint: string }[] = [
   { key: "context", label: "Context engine", agent: "scout", hint: "stage 1: gather files, facts, constraints" },
   { key: "coder", label: "Lead coder", agent: "worker", hint: "stage 2: implement from the context" },
   { key: "security", label: "Security specialist", agent: "reviewer", hint: "stage 3: audit the diff for security holes" },
-  { key: "qa", label: "QA", agent: "reviewer", hint: "stage 3: test and validate the diff" },
+  { key: "qa", label: "QA", agent: "oracle", hint: "stage 3: test and validate the diff" },
 ];
 
 const DEFAULTS: Config = {
@@ -393,7 +393,7 @@ function record(key, result) {
   return result;
 }
 function runStage(key, spec) {
-  return Promise.resolve().then(() => runs.run(key, spec)).catch(error => ({
+  return runs.run(key, spec).catch(error => ({
     ok: false, error: error instanceof Error ? error.message : String(error)
   }));
 }
