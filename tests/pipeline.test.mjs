@@ -84,3 +84,12 @@ for (const stage of ['research', 'implement', 'security', 'qa', 'fix']) test('st
   if (stage === 'implement') assert.deepEqual(calls, ['research', 'implement']);
   if (stage === 'security' || stage === 'qa') assert.ok(!calls.includes('fix'));
 });
+
+test('workflow uses sandbox-compatible plain helpers', () => {
+  assert.doesNotMatch(script, /async\s+function|async\s*\(/);
+});
+test('installed pi-subagents validator accepts the workflow', { skip: !process.env.PI_SUBAGENTS_VALIDATOR }, async () => {
+  const { validateWorkflowScript } = await import(process.env.PI_SUBAGENTS_VALIDATOR);
+  const result = validateWorkflowScript(script);
+  assert.equal(result.ok, true, JSON.stringify(result.errors));
+});

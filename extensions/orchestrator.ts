@@ -392,12 +392,10 @@ function record(key, result) {
   metrics[key] = { usage, durationMs: null, runId: result.runId || null };
   return result;
 }
-async function runStage(key, spec) {
-  try {
-    return await runs.run(key, spec);
-  } catch (error) {
-    return { ok: false, error: error instanceof Error ? error.message : String(error) };
-  }
+function runStage(key, spec) {
+  return Promise.resolve().then(() => runs.run(key, spec)).catch(error => ({
+    ok: false, error: error instanceof Error ? error.message : String(error)
+  }));
 }
 const stages = args.stages || {};
 const skipped = [stages.context === false ? "research" : null, stages.security === false ? "security" : null, stages.qa === false ? "qa" : null].filter(Boolean);
