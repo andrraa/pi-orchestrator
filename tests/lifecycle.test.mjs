@@ -24,17 +24,19 @@ function setup(child = false) {
       },
     },
   };
+  let gitOutputs = [];
   const code = stripTypeScriptTypes(source.replace(/^import .*;\n/gm, '').replace('export default function', 'function install').replace(/export /g, ''));
   let id = 0;
   const sandbox = {
     process: { env: { PI_SUBAGENT_CHILD: child ? '1' : '' } },
     fs: { readFileSync: () => JSON.stringify(config), writeFileSync: (_, text) => { config = JSON.parse(text); }, renameSync() {} },
     os: { homedir: () => '/fake' }, path: { join: (...p) => p.join('/') }, randomUUID: () => String(++id),
-    Type: { Object: x => x, String: x => x }, AbortController, setTimeout, clearTimeout,
+    execFile: (_cmd, _args, _opts, cb) => cb(null, gitOutputs.length ? gitOutputs.shift() : ''),
+    Type: { Object: x => x, String: x => x, Optional: x => x }, AbortController, setTimeout, clearTimeout,
   };
   vm.runInNewContext(code + '\ninstall(pi);', { ...sandbox, pi });
   const ctx = { modelRegistry: { getAvailable: () => [], refresh: async () => {} }, cwd: '/fake', isIdle: () => true, ui: { notify: text => notices.push(text) } };
-  return { setConfig: value => { config = value; }, handlers, commands, tools, requests, ctx, messages, notices, complete: (text, success = true) => listeners.get('subagent:async-complete')?.({ runId: 'owned-run', text, success }) };
+  return { setConfig: value => { config = value; }, setGit: list => { gitOutputs = list.slice(); }, handlers, commands, tools, requests, ctx, messages, notices, complete: (text, success = true) => listeners.get('subagent:async-complete')?.({ runId: 'owned-run', text, success }) };
 }
 test('children register nothing and cannot mutate global toggle', () => {
   const app = setup(true);
@@ -135,4 +137,42 @@ test('refreshes dynamic models before passing their exact identifier to spawn', 
   assert.equal(app.requests.find(r => r.method === 'spawn').params.args.contextModel, 'antigravity/gemini-3.8-flash-high');
   controller.abort();
   await pending;
+});
+
+test('verify command reaches the workflow arguments and is omitted when absent', async () => {
+  const app = setup();
+  await arm(app);
+  let pending = app.tools.orchestrate.execute('', { task: 'test', verify: 'npm test' }, undefined, undefined, app.ctx);
+  await new Promise(resolve => setImmediate(resolve));
+  app.complete(JSON.stringify({ verdict: 'clean' }));
+  await pending;
+  assert.equal(app.requests.find(r => r.method === 'spawn').params.args.verify, 'npm test');
+
+  const second = setup();
+  await arm(second);
+  pending = second.tools.orchestrate.execute('', { task: 'test' }, undefined, undefined, second.ctx);
+  await new Promise(resolve => setImmediate(resolve));
+  second.complete(JSON.stringify({ verdict: 'clean' }));
+  await pending;
+  assert.ok(!Object.keys(second.requests.find(r => r.method === 'spawn').params.args).includes('verify'));
+});
+
+test('report states the machine-checked working tree, not the coder claim', async () => {
+  const app = setup();
+  app.setGit(['', ' M src/a.ts']);
+  await arm(app);
+  const pending = app.tools.orchestrate.execute('', { task: 'test' }, undefined, undefined, app.ctx);
+  await new Promise(resolve => setImmediate(resolve));
+  app.complete(JSON.stringify({ verdict: 'clean' }));
+  const text = (await pending).content[0].text;
+  assert.match(text, /Working tree \(machine check\): 0 changed path\(s\) before, 1 after; new: M src\/a\.ts/);
+});
+
+test('workingTreeLine reports added, resolved and non-git states', () => {
+  const fn = stripTypeScriptTypes(source.match(/export function workingTreeLine[\s\S]*?\n}\n/)[0].replace('export ', ''));
+  const workingTreeLine = vm.runInNewContext(fn + '\nworkingTreeLine');
+  assert.match(workingTreeLine(null, []), /not a git work tree/);
+  assert.equal(workingTreeLine([], ['M a']), 'Working tree (machine check): 0 changed path(s) before, 1 after; new: M a');
+  assert.equal(workingTreeLine(['M a', 'M b'], ['M b']), 'Working tree (machine check): 2 changed path(s) before, 1 after; resolved: M a');
+  assert.equal(workingTreeLine([], []), 'Working tree (machine check): 0 changed path(s) before, 0 after');
 });

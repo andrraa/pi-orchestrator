@@ -175,6 +175,15 @@ Stages: research -> implement -> security+QA (parallel) -> at most one fix round
 | `fixed-unverified` | A fix round succeeded but has not been independently re-reviewed. |
 | `unverified` | The pipeline could not obtain a real verdict — treat as **not** verified. |
 
+#### Machine attestation
+
+Two report fields do not come from a model:
+
+- **`verify`** (optional `orchestrate` argument) is a shell command the runtime executes with `gate` after implement and after any fix. A nonzero exit fails that stage, so the pipeline can no longer reach `clean` while the operator's command is red. Omit it and the pipeline falls back to reviewer evidence only.
+- **`Working tree (machine check)`** is the manager's own `git status --porcelain` diff around the run: paths that appeared, paths that were resolved. It replaces "the coder says the repo was untouched", and reports that `cwd` is not a git work tree instead of guessing.
+
+Everything else in a report is agent-reported: reviewers describe what they inspected and ran, but nothing is machine-attested unless it came from `verify` or the working-tree snapshot.
+
 While the pipeline runs, `edit` / `write` are blocked. An explicit clean or completed-with-skips JSON verdict with successful completion unlocks editing until this task ends. Fixed-unverified or non-JSON completion leaves the gate closed.
 
 ---
@@ -319,7 +328,8 @@ report is guidance, not proof. They must not edit source or revert user changes
 findings and nonblank evidence; `clean` also requires no findings. QA evidence must
 state commands, exit statuses, results and verification limits. Essential unavailable
 checks return blocked with empty findings, not invented code defects. Evidence is
-agent-reported, not machine-attested proof that commands ran.
+agent-reported, not machine-attested proof that commands ran — pass `verify` when a
+green result must rest on an exit status instead.
 
 Only concrete findings from valid blocked reviews reach the fixer, along with
 research, implementation context and reviewer evidence. Invalid or failed reviews

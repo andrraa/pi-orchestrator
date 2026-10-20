@@ -1,15 +1,15 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 const source = readFileSync(new URL('../extensions/orchestrator.ts', import.meta.url), 'utf8');
 const script = source.match(/export function buildPipelineScript\(\): string \{\s*return `([\s\S]*?)`\.trim\(\);/)[1];
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
-export async function simulate(overrides = {}, stages) {
-  const calls = [], tasks = {};
+export async function simulate(overrides = {}, stages, extraArgs = {}) {
+  const calls = [], tasks = {}, specs = {};
   const good = { ok: true, output: 'brief', structuredOutput: { verdict: 'clean', findings: [], evidence: 'Inspected diff; node --test exited 0' } };
-  const run = async (key, spec) => { calls.push(key); tasks[key] = spec?.task; return { ...good, ...overrides[key] }; };
-  const result = await new AsyncFunction('runs', 'args', script)({ run, all: specs => Promise.all(specs.map(s => run(s.key, s))) }, { task: 'test', stages });
-  return { calls, result, tasks };
+  const run = async (key, spec) => { calls.push(key); tasks[key] = spec?.task; specs[key] = spec; return { ...good, ...overrides[key] }; };
+  const result = await new AsyncFunction('runs', 'args', script)({ run, all: specs => Promise.all(specs.map(s => run(s.key, s))) }, { task: 'test', stages, ...extraArgs });
+  return { calls, result, tasks, specs };
 }
 test('clean pipeline runs four stages', async () => {
   const { calls, result } = await simulate();
@@ -85,11 +85,37 @@ for (const stage of ['research', 'implement', 'security', 'qa', 'fix']) test('st
   if (stage === 'security' || stage === 'qa') assert.ok(!calls.includes('fix'));
 });
 
+test('verify becomes a host gate on implement and fix, never on reviewers', async () => {
+  const blocked = { qa: { structuredOutput: { verdict: 'blocked', findings: ['src/a.ts:1 fails'], evidence: 'node --test exited 1' } } };
+  const { specs, result } = await simulate(blocked, {}, { verify: 'node --test tests/a.test.mjs' });
+  assert.equal(specs.implement.gate, 'node --test tests/a.test.mjs');
+  assert.equal(specs.fix.gate, 'node --test tests/a.test.mjs');
+  assert.equal(specs.security.gate, undefined);
+  assert.equal(specs.qa.gate, undefined);
+  assert.deepEqual(result.verification, { command: 'node --test tests/a.test.mjs', passed: true });
+  assert.match(specs.qa.task, /HOST GATE \(machine-executed by the runtime; a nonzero exit fails this pipeline\):\nnode --test tests\/a\.test\.mjs/);
+});
+test('absent verify command creates no gate and no verification claim', async () => {
+  const { specs, result } = await simulate({}, {}, { verify: '   ' });
+  assert.equal(specs.implement.gate, undefined);
+  assert.equal(result.verification, null);
+});
+test('failed host gate leaves the pipeline unverified', async () => {
+  const { result } = await simulate({ implement: { ok: false, error: 'gate exited 1' } }, {}, { verify: 'npm test' });
+  assert.equal(result.verdict, 'unverified');
+  assert.equal(result.failedStage, 'implement');
+  assert.deepEqual(result.verification, { command: 'npm test', passed: false });
+});
+
 test('workflow uses sandbox-compatible plain helpers', () => {
   assert.doesNotMatch(script, /async\s+function|async\s*\(/);
 });
-test('installed pi-subagents validator accepts the workflow', { skip: !process.env.PI_SUBAGENTS_VALIDATOR }, async () => {
-  const { validateWorkflowScript } = await import(process.env.PI_SUBAGENTS_VALIDATOR);
+// Run the real sandbox validator by default: it is the only thing that catches
+// "nested async function" and "unawaited runs.run" before a live run wastes tokens.
+const validatorPath = [process.env.PI_SUBAGENTS_VALIDATOR, `${process.env.HOME}/.pi/agent/npm/node_modules/pi-subagents/src/workflows/scripted-workflow.js`]
+  .find(candidate => candidate && existsSync(candidate));
+test('installed pi-subagents validator accepts the workflow', { skip: validatorPath ? false : 'pi-subagents validator not found' }, async () => {
+  const { validateWorkflowScript } = await import(validatorPath);
   const result = validateWorkflowScript(script);
   assert.equal(result.ok, true, JSON.stringify(result.errors));
 });

@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -344,6 +345,29 @@ export function enforcementDecision(
 }
 
 /**
+ * Ground truth for "what did this run touch": the manager's own git snapshot,
+ * not the coder's claim. Returns null when cwd is not a git work tree.
+ */
+export function gitStatus(cwd: string): Promise<string[] | null> {
+  return new Promise((resolve) => {
+    execFile("git", ["status", "--porcelain"], { cwd, timeout: 5_000 }, (error, stdout) => {
+      if (error) return resolve(null);
+      resolve(stdout.split("\n").map((line) => line.trim()).filter(Boolean));
+    });
+  });
+}
+
+export function workingTreeLine(before: string[] | null, after: string[] | null): string {
+  if (!before || !after) return "Working tree (machine check): not a git work tree, so changes were not attested.";
+  const earlier = new Set(before);
+  const added = after.filter((line) => !earlier.has(line));
+  const removed = before.filter((line) => !after.includes(line));
+  return `Working tree (machine check): ${before.length} changed path(s) before, ${after.length} after` +
+    (added.length ? `; new: ${added.join(", ")}` : "") +
+    (removed.length ? `; resolved: ${removed.join(", ")}` : "");
+}
+
+/**
  * The workflow-sandbox script body the orchestrate tool ships to pi-subagents.
  * Plain (non-async) helpers + top-level await only; args is plain data.
  */
@@ -400,23 +424,29 @@ function runStage(key, spec) {
 const stages = args.stages || {};
 const skipped = [stages.context === false ? "research" : null, stages.security === false ? "security" : null, stages.qa === false ? "qa" : null].filter(Boolean);
 const task = args.task;
+// Host-executed gate: the runtime's exit status, not the coder's claim, decides this.
+const verify = typeof args.verify === "string" && args.verify.trim() ? args.verify.trim() : null;
 const research = stages.context === false ? { ok: true, output: "Research skipped by operator. Inspect the relevant files and constraints before editing." } : await runStage("research", child(
   args.contextAgent,
-  "Gather the files, facts, and constraints needed to change this codebase safely." + NL + NL + "TASK:" + NL + task + NL + NL + "Stay within the requested scope. For standalone temporary fixtures, inspect only the runtime and fixture requirements, not the host repository. For repository changes, inspect the working tree and identify existing user changes to preserve. Do not edit source or revert changes. Use these handoff headings: Scope and acceptance criteria; Relevant files, callers and tests; Constraints and existing user changes; Minimum implementation plan; Verification commands; Uncertainties and blockers. Cite paths and line numbers where useful. Discover the actual test commands; do not invent them.",
+  "Gather the files, facts, and constraints needed to change this codebase safely." + NL + NL + "TASK:" + NL + task + NL + NL + "Stay within the requested scope. Read-only repository metadata (git status, git log, ls) is allowed. For standalone temporary fixtures, inspect only the runtime and fixture requirements, not the host repository source. For repository changes, identify existing user changes to preserve. Do not edit source or revert changes. Use these handoff headings: Scope and acceptance criteria; Relevant files, callers and tests; Constraints and existing user changes; Minimum implementation plan; Verification commands; Uncertainties and blockers. Cite paths and line numbers where useful. Discover the actual test commands; do not invent them.",
   args.contextModel,
   args.thinkingContext
 ));
 if (stages.context !== false) record("research", research);
 if (research.ok !== true) return { metrics, verdict: "unverified", failedStage: "research", error: research.error || research.output || "no result", partialChanges: false };
-const implementation = await runStage("implement", child(
+const implementSpec = child(
   args.coderAgent,
   "Make the requested change in the current working directory." + NL + NL + "TASK:" + NL + task + NL + NL + "RESEARCH (from the context stage):" + NL + research.output + NL + NL + "Inspect the actual files and working tree before editing. Preserve unrelated and existing user changes; implement only the requested scope. Add a focused regression test for non-trivial changes. Run the focused tests and report changed paths, commands, exit statuses, results and any limitations.",
   args.coderModel,
   args.thinkingCoder
-));
+);
+if (verify) implementSpec.gate = verify;
+const implementation = await runStage("implement", implementSpec);
 record("implement", implementation);
-if (implementation.ok !== true) return { metrics, verdict: "unverified", failedStage: "implement", error: implementation.error || implementation.output || "no result", partialChanges: true };
-const reviewBrief = "TASK:" + NL + task + NL + NL + "RESEARCH SUMMARY:" + NL + research.output + NL + NL + "IMPLEMENTATION REPORT (coder):" + NL + implementation.output;
+const verification = verify ? { command: verify, passed: implementation.ok === true } : null;
+if (implementation.ok !== true) return { metrics, verification, verdict: "unverified", failedStage: "implement", error: implementation.error || implementation.output || "no result", partialChanges: true };
+const verifyLine = verify ? NL + NL + "HOST GATE (machine-executed by the runtime; a nonzero exit fails this pipeline):" + NL + verify : "";
+const reviewBrief = "TASK:" + NL + task + verifyLine + NL + NL + "RESEARCH SUMMARY:" + NL + research.output + NL + NL + "IMPLEMENTATION REPORT (coder):" + NL + implementation.output;
 const specs = [
   withKey("security", child(
     args.securityAgent,
@@ -451,17 +481,20 @@ const findings = checks.filter(r => validReview(r) && r.structuredOutput.verdict
   .flatMap(r => r.structuredOutput.findings);
 let fix = null;
 if (findings.length > 0) {
-  fix = await runStage("fix", child(
+  const fixSpec = child(
     args.coderAgent,
     "Fix only the concrete blockers below. Inspect the working tree and preserve unrelated and existing user changes. Re-run the failing commands and relevant regression tests; report commands, exit statuses and limitations." + NL + NL + "TASK:" + NL + task + NL + NL + "RESEARCH:" + NL + research.output + NL + NL + "IMPLEMENTATION:" + NL + implementation.output + NL + NL + "REVIEW EVIDENCE:" + NL + JSON.stringify(checks.map(r => ({ review: r.structuredOutput, error: r.error }))) + NL + NL + "BLOCKERS (verbatim):" + NL + findings.join(NL) + NL + NL + "Report exactly which files changed and the test results.",
     args.coderModel,
     args.thinkingCoder
-  ));
+  );
+  if (verify) fixSpec.gate = verify;
+  fix = await runStage("fix", fixSpec);
   record("fix", fix);
 }
 return {
   metrics,
   skipped,
+  verification,
   research: { artifacts: research.artifactPaths || [], outputReference: research.outputReference || null },
   implementation: { artifacts: implementation.artifactPaths || [], outputReference: implementation.outputReference || null },
   security: security.skipped ? { skipped: true } : { valid: !!validReview(security), review: security.structuredOutput || null, error: security.error || null, output: security.output || null },
@@ -621,6 +654,7 @@ export default function (pi: ExtensionAPI) {
     ],
     parameters: Type.Object({
       task: Type.String({ description: "The change to implement, in plain language; the pipeline researches, implements, and verifies it." }),
+      verify: Type.Optional(Type.String({ description: "Optional shell command the runtime executes after implement (and after any fix). A nonzero exit fails the run, so a clean verdict rests on a machine-attested result instead of the coder's claim. Use the repository's real test command." })),
     }),
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       if (process.env.PI_SUBAGENT_CHILD === "1") {
@@ -656,6 +690,7 @@ export default function (pi: ExtensionAPI) {
         const roleAgent = (k: RoleKey) => role(k).agent;
         const args = {
           task: params.task,
+          verify: params.verify,
           stages: cfg.stages,
           contextAgent: roleAgent("context"),
           contextModel: cfg.roles.context,
@@ -671,8 +706,10 @@ export default function (pi: ExtensionAPI) {
           thinkingQa: cfg.thinking.qa,
         };
 
+        const before = await gitStatus(ctx.cwd);
+
         // The bridge rejects empty string args; absent model/thinking means default.
-        const workflowArgs = Object.fromEntries(Object.entries(args).filter(([, value]) => value !== ""));
+        const workflowArgs = Object.fromEntries(Object.entries(args).filter(([, value]) => value !== "" && value !== undefined));
         const spawn = await rpcRequest(pi, "spawn", { script: buildPipelineScript(), args: workflowArgs, cwd: ctx.cwd }, SPAWN_TIMEOUT_MS);
         if (!spawn.ok) {
           pipelineState.unavailable = true;
@@ -707,6 +744,7 @@ export default function (pi: ExtensionAPI) {
         pipelineState.lastRunId = runId;
         if (!taskActive) controller.abort();
         const completion = await waitForCompletion(pi, runId, controller.signal, PIPELINE_TIMEOUT_MS);
+        const tree = workingTreeLine(before, await gitStatus(ctx.cwd));
 
         if (completion.status !== "completed") {
           const stop = await rpcRequest(pi, "stop", { id: runId }, SPAWN_TIMEOUT_MS);
@@ -727,7 +765,7 @@ export default function (pi: ExtensionAPI) {
         const ok = completion.success && (verdict === "clean" || verdict === "completed-with-skips") && !controller.signal.aborted && taskActive;
         if (ok) pipelineState.verified = true; // Acceptance follows operator-selected checks, not a claim of full review.
         return {
-          content: [{ type: "text" as const, text: `${completion.text}\n\n${STAGE_SUMMARY}` }],
+          content: [{ type: "text" as const, text: `${completion.text}\n\n${tree}\n${STAGE_SUMMARY}` }],
           details: { runId, ok },
         };
       } finally {
