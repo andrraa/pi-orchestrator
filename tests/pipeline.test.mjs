@@ -22,12 +22,6 @@ for (const failed of ['research', 'implement']) test(`stop after ${failed} failu
   assert.equal(result.verdict, 'unverified');
   assert.match(JSON.stringify(result), /transport failed/);
 });
-test('direct bypass requires explicit operator command and resets each user turn', () => {
-  assert.match(source, /if \(arg === "direct"\)/);
-  assert.match(source, /const direct = directNextTurn;\s*directNextTurn = false;/);
-  assert.match(source, /pipelineState.direct = false;/);
-  assert.match(source, /state.verified \|\| state.direct/);
-});
 test('successful fix is not independently verified', async () => {
   const { result } = await simulate({ security: { structuredOutput: { verdict: 'blocked', findings: ['unsafe input'] } } });
   assert.equal(result.verdict, 'fixed-unverified');

@@ -15,7 +15,6 @@ const ROLE_KEYS: RoleKey[] = ["context", "coder", "security", "qa"];
 const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
 interface Config {
-  enabled: boolean;
   roles: Record<RoleKey, string>;
   thinking: Record<RoleKey, string>;
   stages: Record<"context" | "security" | "qa", boolean>;
@@ -29,7 +28,6 @@ const ROLES: { key: RoleKey; label: string; agent: string; hint: string }[] = [
 ];
 
 const DEFAULTS: Config = {
-  enabled: false,
   stages: { context: true, security: true, qa: true },
   roles: { context: "", coder: "", security: "", qa: "" },
   thinking: { context: "", coder: "", security: "", qa: "" },
@@ -44,9 +42,9 @@ const SPAWN_TIMEOUT_MS = 20_000;
 const PIPELINE_TIMEOUT_MS = 45 * 60 * 1000;
 
 // --- pipeline + enforcement state (module scope) ----------------------------
-let pipelineState: { verified: boolean; lastRunId?: string; unavailable?: boolean; direct?: boolean } = { verified: false };
-let modeEnabled = false;
-let directNextTurn = false;
+let pipelineState: { verified: boolean; lastRunId?: string; unavailable?: boolean } = { verified: false };
+let taskActive = false;
+let pendingPrompt: string | undefined;
 
 // Memoized positive "can we talk to pi-subagents?" answer. Undefined until a probe succeeds.
 // A negative answer is never memoized: a slow boot or a momentary delay must not
@@ -55,7 +53,7 @@ let bridgeOk: boolean | undefined;
 const PROBE_TIMEOUT_MS = 3_000;
 
 export const MISSING_DEPENDENCY =
-  "orchestrator: pi-subagents is not installed or not enabled. Run `pi install npm:pi-subagents`, then restart pi. Orchestrator mode cannot be enabled without it.";
+  "orchestrator: pi-subagents is not installed or not enabled. Run `pi install npm:pi-subagents`, then restart pi. An orchestrator task cannot start without it.";
 
 /**
  * `pi-subagents` does not register anything we can enumerate from an extension,
@@ -79,24 +77,10 @@ function probeBridge(pi: ExtensionAPI): Promise<boolean> {
   });
 }
 
-/**
- * Probe the bridge with retries before concluding it is absent, so a slow
- * session start is not mistaken for a missing dependency. Probes immediately,
- * then +1s and +3s; returns false on the first success and true only when all
- * three probes miss.
- */
-async function bridgeConfirmedMissing(pi: ExtensionAPI): Promise<boolean> {
-  for (const waitMs of [0, 1_000, 3_000]) {
-    if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
-    if (await probeBridge(pi)) return false;
-  }
-  return true;
-}
-
 function load(): Config {
   try {
     const raw = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"));
-    return { enabled: !!raw.enabled, roles: { ...DEFAULTS.roles, ...raw.roles }, thinking: normalizeThinking(raw.thinking), stages: { context: raw.stages?.context !== false, security: raw.stages?.security !== false, qa: raw.stages?.qa !== false } };
+    return { roles: { ...DEFAULTS.roles, ...raw.roles }, thinking: normalizeThinking(raw.thinking), stages: { context: raw.stages?.context !== false, security: raw.stages?.security !== false, qa: raw.stages?.qa !== false } };
   } catch {
     return JSON.parse(JSON.stringify(DEFAULTS)) as Config;
   }
@@ -116,11 +100,10 @@ function normalizeThinking(raw: unknown): Record<RoleKey, string> {
 
 function save(cfg: Config) {
   // Atomic write: a concurrent reader never sees a torn file, which would make
-  // load() fall back to DEFAULTS (enabled: false) and clobber the operator's toggle.
+  // load() fall back to DEFAULTS and lose the operator's settings.
   const tmpPath = CONFIG_PATH + "." + randomUUID() + ".tmp";
   fs.writeFileSync(tmpPath, JSON.stringify(cfg, null, 2) + "\n");
   fs.renameSync(tmpPath, CONFIG_PATH);
-  modeEnabled = cfg.enabled;
 }
 
 /**
@@ -143,7 +126,6 @@ function modelIds(ctx: ExtensionCommandContext): string[] {
 
 const THINKING_CYCLE = ["default", ...THINKING_LEVELS];
 const MENU_VISIBLE = 12;
-const ENABLED_ID = "enabled";
 const MANAGER_ID = "manager";
 
 /**
@@ -214,21 +196,13 @@ function pickModel(ctx: ExtensionCommandContext, title: string, current: string)
  * or undefined when they cancelled. Selecting a model rows does NOT change
  * anything by itself: the caller opens the picker, so the menu stays reachable.
  */
-function menuOnce(pi: ExtensionAPI, ctx: ExtensionCommandContext, unavailable: boolean, onToggle: (enabled: boolean) => void): Promise<string | undefined> {
+function menuOnce(ctx: ExtensionCommandContext, unavailable: boolean): Promise<string | undefined> {
   const cfg = load();
   const manager = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "default";
 
   return ctx.ui.custom<string | undefined>((tui, theme, _keybindings, done) => {
     const value = (key: RoleKey) => cfg.roles[key] || "belum dipilih";
     const items: SettingItem[] = [
-      {
-        id: ENABLED_ID,
-        label: "Enable orchestrator",
-        currentValue: cfg.enabled ? "ON" : "OFF",
-        // Without pi-subagents there is nothing to enable, so the row refuses to move.
-        values: unavailable ? ["OFF"] : ["ON", "OFF"],
-        description: unavailable ? MISSING_DEPENDENCY : undefined,
-      },
       // a one-element `values` array makes Enter fire onChange without moving focus
       { id: MANAGER_ID, label: "Manager model", currentValue: manager, values: [manager] },
       ...(["context", "security", "qa"] as const).map((key) => ({
@@ -250,18 +224,6 @@ function menuOnce(pi: ExtensionAPI, ctx: ExtensionCommandContext, unavailable: b
       MENU_VISIBLE,
       getSettingsListTheme(),
       (id, newValue) => {
-        if (id === ENABLED_ID) {
-          if (newValue === "ON" && unavailable) {
-            ctx.ui.notify(MISSING_DEPENDENCY, "error");
-            return;
-          }
-          const updated = updateConfig((c) => {
-            c.enabled = newValue === "ON";
-          });
-          onToggle(updated.enabled);
-          ctx.ui.notify(`Orchestrator mode: ${updated.enabled ? "ON" : "OFF"}`, "info");
-          return;
-        }
         if (id.startsWith("stage:")) {
           updateConfig((c) => { c.stages[id.slice(6) as keyof Config["stages"]] = newValue === "ON"; });
           return;
@@ -278,7 +240,7 @@ function menuOnce(pi: ExtensionAPI, ctx: ExtensionCommandContext, unavailable: b
       // no search: the menu is a short fixed list, so the hint line is just noise
       { enableSearch: false },
     );
-    list.selectItem(ENABLED_ID);
+    list.selectItem(MANAGER_ID);
 
     const title = {
       invalidate() {},
@@ -305,11 +267,11 @@ function menuOnce(pi: ExtensionAPI, ctx: ExtensionCommandContext, unavailable: b
 }
 
 /** Menu and picker alternate so a selection lands back in the menu, not at the prompt. */
-async function openMenu(pi: ExtensionAPI, ctx: ExtensionCommandContext, onToggle: (enabled: boolean) => void): Promise<void> {
+async function openMenu(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
   const missing = !(await probeBridge(pi));
   if (missing) ctx.ui.notify(MISSING_DEPENDENCY, "error");
   for (;;) {
-    const row = await menuOnce(pi, ctx, missing, onToggle);
+    const row = await menuOnce(ctx, missing);
     if (row === undefined) return;
 
     if (row === MANAGER_ID) {
@@ -345,15 +307,15 @@ function guidelines(cfg: Config): string[] {
   const model = (k: RoleKey) => cfg.roles[k] || "default";
   const level = (k: RoleKey) => cfg.thinking[k] || "default";
   return [
-    "Orchestrator mode is ON (the operator asked for delegation). You are the MANAGER: keep routing, integration, decisions, and final acceptance in this main session.",
+    "This task was explicitly submitted with /orchestrator. You are the MANAGER: keep routing, integration, decisions, and final acceptance in this main session.",
     "For any request that changes code, call the orchestrate tool with the task; it runs the fixed pipeline and returns the report.",
     `1. CONTEXT — the pipeline's agent "${role("context").agent}" (model ${model("context")}, thinking ${level("context")}) gathers the files, facts, and constraints.`,
     `2. IMPLEMENT — the pipeline's agent "${role("coder").agent}" (model ${model("coder")}, thinking ${level("coder")}) implements from that context. One writer at a time.`,
     `3. AUDIT + TEST — after the worker reports done the pipeline runs BOTH in parallel: agent "${role("security").agent}" (model ${model("security")}, thinking ${level("security")}) audits the diff, and agent "${role("qa").agent}" (model ${model("qa")}, thinking ${level("qa")}) tests and validates it.`,
     `Enabled stages: research=${cfg.stages.context}, security=${cfg.stages.security}, QA=${cfg.stages.qa}. Coder is always required. Disabled stages do not run; report skipped checks honestly.`,
     "4. You synthesize the returned report, apply at most small final adjustments yourself, then give the final answer.",
-    "While orchestrator mode is ON you may NOT edit files or launch the coder subagent directly (those tool calls are blocked) until a pipeline run has completed for this request.",
-    "Read-only questions stop after stage 1. Read-only single-step tasks stay on the main session. Small low-risk edits require the operator to arm /orchestrator direct for one turn; do not self-classify edits to bypass the gate.",
+    "For this orchestrator task you may NOT edit files or launch the coder subagent directly (those tool calls are blocked) until a pipeline run has completed for this request.",
+    "Call orchestrate for the submitted task. Do not bypass the pipeline by editing directly.",
     "If you keep a code-change request on yourself instead of running the flow, say why in one line.",
   ];
 }
@@ -365,25 +327,25 @@ function guidelines(cfg: Config): string[] {
 export function enforcementDecision(
   toolName: string,
   input: Record<string, unknown>,
-  state: { verified: boolean; unavailable?: boolean; direct?: boolean },
-  cfg: Pick<Config, "enabled">,
+  state: { verified: boolean; unavailable?: boolean },
+  cfg: { active: boolean },
 ): { block: true; reason: string } | undefined {
-  if (!cfg.enabled) return undefined;
+  if (!cfg.active) return undefined;
   if (process.env.PI_SUBAGENT_CHILD === "1") return undefined;
   if (state.unavailable) return undefined; // fail open: a broken pi-subagents install must not wedge the session
-  if (state.verified || state.direct) return undefined;
+  if (state.verified) return undefined;
   if (toolName === "edit" || toolName === "write") {
     return {
       block: true,
       reason:
-        "Orchestrator mode is ON: the manager must not write code itself. Call the orchestrate tool and let the coder stage implement, then apply only final adjustments after the pipeline reports done.",
+        "This orchestrator task is active: the manager must not write code itself. Call the orchestrate tool and let the coder stage implement, then apply only final adjustments after the pipeline reports done.",
     };
   }
   const agent = input && typeof (input as { agent?: unknown }).agent === "string" ? ((input as { agent: string }).agent).trim().toLowerCase() : undefined;
   if (toolName === "subagent" && agent === role("coder").agent.trim().toLowerCase()) {
     return {
       block: true,
-      reason: "Orchestrator mode is ON: launch the coder only through the orchestrate pipeline, not by calling the subagent tool directly.",
+      reason: "This orchestrator task is active: launch the coder only through the orchestrate pipeline, not by calling the subagent tool directly.",
     };
   }
   return undefined;
@@ -612,41 +574,44 @@ export default function (pi: ExtensionAPI) {
   const cancelActiveRuns = () => {
     for (const controller of activeRuns) controller.abort();
     pipelineState.verified = false;
-    pipelineState.direct = false;
-    directNextTurn = false;
+    taskActive = false;
+    pendingPrompt = undefined;
   };
-  modeEnabled = load().enabled;
 
   pi.registerCommand("orchestrator", {
-    description: "pi-subagents orchestrator: toggle on/off, pick a model and thinking level per role",
+    description: "Run orchestration for one task: /orchestrator <prompt>",
     handler: async (args, ctx) => {
-      const arg = args.trim().toLowerCase();
-      if (arg === "direct") {
-        directNextTurn = true;
-        ctx.ui.notify("Direct editing armed for the next user turn only. Use for small, low-risk changes; auth, data, migrations and complex changes still need the pipeline.", "info");
+      const prompt = args.trim();
+      if (!prompt) {
+        ctx.ui.notify("Usage: /orchestrator <prompt>. Configure roles with /orchestrator-settings.", "info");
         return;
       }
-      if (arg === "on" || arg === "off") {
-        if (arg === "on" && !(await probeBridge(pi))) {
-          ctx.ui.notify(MISSING_DEPENDENCY, "error");
-          return;
-        }
-        const updated = updateConfig((c) => {
-          c.enabled = arg === "on";
-        });
-        if (!updated.enabled) cancelActiveRuns();
-        else pipelineState.unavailable = false;
-        ctx.ui.notify(`Orchestrator mode: ${updated.enabled ? "ON" : "OFF"}`, "info");
+      if (!ctx.isIdle() || taskActive || pendingPrompt || activeRuns.size) {
+        ctx.ui.notify("Wait for the current task to finish before starting orchestration.", "error");
         return;
       }
+      if (!(await probeBridge(pi))) {
+        ctx.ui.notify(MISSING_DEPENDENCY, "error");
+        return;
+      }
+      pendingPrompt = prompt;
+      try {
+        pi.sendUserMessage(prompt);
+      } catch (error) {
+        pendingPrompt = undefined;
+        throw error;
+      }
+    },
+  });
+
+  pi.registerCommand("orchestrator-settings", {
+    description: "Configure orchestrator models, thinking levels and optional stages",
+    handler: async (_args, ctx) => {
       if (ctx.mode !== "tui") {
-        ctx.ui.notify("/orchestrator needs TUI mode", "error");
+        ctx.ui.notify("/orchestrator-settings needs TUI mode", "error");
         return;
       }
-      await openMenu(pi, ctx, (enabled) => {
-        if (!enabled) cancelActiveRuns();
-        else pipelineState.unavailable = false;
-      });
+      await openMenu(pi, ctx);
     },
   });
 
@@ -657,7 +622,7 @@ export default function (pi: ExtensionAPI) {
       "Run the enforced fixed pipeline for a code change on this machine: research -> implement -> security + QA in parallel -> at most one fix round. One call runs the whole flow and returns the report.",
     promptSnippet: "Run the enforced researcher->worker->security+QA pipeline",
     promptGuidelines: [
-      "When orchestrator mode is ON, run code changes through the orchestrate tool; you may not edit files or launch the coder (worker) subagent directly until a pipeline run has completed for this request.",
+      "For tasks explicitly submitted with /orchestrator, run code changes through the orchestrate tool; you may not edit files or launch the coder (worker) subagent directly until a pipeline run has completed for this request.",
     ],
     parameters: Type.Object({
       task: Type.String({ description: "The change to implement, in plain language; the pipeline researches, implements, and verifies it." }),
@@ -672,8 +637,8 @@ export default function (pi: ExtensionAPI) {
       }
 
       const cfg = load();
-      if (!cfg.enabled || signal?.aborted) return {
-        content: [{ type: "text" as const, text: "Orchestrator is OFF or this request was aborted; no workflow started." }],
+      if (!taskActive || signal?.aborted) return {
+        content: [{ type: "text" as const, text: "No active /orchestrator task, or this request was aborted; no workflow started." }],
         details: { ok: false }, isError: true,
       };
       if (activeRuns.size) return {
@@ -735,7 +700,7 @@ export default function (pi: ExtensionAPI) {
         }
 
         pipelineState.lastRunId = runId;
-        if (!load().enabled) controller.abort();
+        if (!taskActive) controller.abort();
         const completion = await waitForCompletion(pi, runId, controller.signal, PIPELINE_TIMEOUT_MS);
 
         if (completion.status !== "completed") {
@@ -754,7 +719,7 @@ export default function (pi: ExtensionAPI) {
 
         let verdict: unknown;
         try { verdict = JSON.parse(completion.text).verdict; } catch { /* Non-JSON completion is not verification evidence. */ }
-        const ok = completion.success && (verdict === "clean" || verdict === "completed-with-skips") && !controller.signal.aborted && load().enabled;
+        const ok = completion.success && (verdict === "clean" || verdict === "completed-with-skips") && !controller.signal.aborted && taskActive;
         if (ok) pipelineState.verified = true; // Acceptance follows operator-selected checks, not a claim of full review.
         return {
           content: [{ type: "text" as const, text: `${completion.text}\n\n${STAGE_SUMMARY}` }],
@@ -768,42 +733,20 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("tool_call", (event) => {
-    modeEnabled = load().enabled;
-    if (!modeEnabled) cancelActiveRuns();
-    return enforcementDecision(event.toolName, event.input as Record<string, unknown>, pipelineState, { enabled: modeEnabled });
+    return enforcementDecision(event.toolName, event.input as Record<string, unknown>, pipelineState, { active: taskActive });
   });
 
   pi.on("session_shutdown", () => cancelActiveRuns());
-
-  // Warn once at startup when the pipeline dependency is missing. Deferred so
-  // the probe never blocks pi's boot; it resolves on the next tick.
-  pi.on("session_start", (_event, ctx) => {
-    setTimeout(() => {
-      void bridgeConfirmedMissing(pi).then((missing) => {
-        if (missing) {
-          ctx.ui.notify(MISSING_DEPENDENCY, "error");
-          pipelineState.unavailable = true;
-        }
-      });
-    }, 0);
-  });
+  pi.on("agent_settled", () => cancelActiveRuns());
 
   pi.on("before_agent_start", (event) => {
     if (event.messageType !== "user") return;
-    // subagent children load extensions too; never push orchestration rules into a child
-    if (process.env.PI_SUBAGENT_CHILD === "1") return;
-    const cfg = load();
-    modeEnabled = cfg.enabled;
-    pipelineState.verified = false;
-    const direct = directNextTurn;
-    directNextTurn = false;
-    pipelineState.direct = false;
-    if (!cfg.enabled) { cancelActiveRuns(); return; }
-    if (direct) {
-      pipelineState.direct = true;
-      event.systemPromptOptions.promptGuidelines.push("The operator explicitly armed /orchestrator direct for this turn. Handle only a small low-risk change directly; for auth, data, migrations or complex changes call orchestrate instead. State why the direct path is appropriate.");
-      return;
-    }
-    for (const line of guidelines(cfg)) event.systemPromptOptions.promptGuidelines.push(line);
+    const requested = pendingPrompt !== undefined && event.prompt === pendingPrompt;
+    pendingPrompt = undefined;
+    cancelActiveRuns();
+    if (!requested) return;
+    taskActive = true;
+    pipelineState = { verified: false };
+    for (const line of guidelines(load())) event.systemPromptOptions.promptGuidelines.push(line);
   });
 }

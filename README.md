@@ -21,18 +21,18 @@
 
 **pi-orchestrator** is a Pi Coding Agent extension that turns delegation from a *suggestion* into *enforced routing*.
 
-A rule written in `AGENTS.md` is soft context: the main model may read it and still decide to do everything itself. This extension closes that gap with three layers — a system-prompt rule injected every turn, a hard `orchestrate` tool that runs the whole pipeline itself, and a tool-call gate that blocks the manager from writing code while the pipeline owns the change.
+A rule written in `AGENTS.md` is soft context: the main model may read it and still decide to do everything itself. This extension closes that gap with three layers — a system-prompt rule injected for an explicitly submitted task, a hard `orchestrate` tool that runs the whole pipeline itself, and a tool-call gate that blocks the manager from writing code while the pipeline owns the change.
 
 ### Features
-- **On/Off Toggle:** `/orchestrator` switches mode instantly; the state persists in `~/.pi/agent/orchestrator.json`.
+- **Per-task command:** `/orchestrator <prompt>` runs one task; ordinary chat stays unaffected. Settings persist, activation does not.
 - **Four Configurable Roles:** Context engine, lead coder, security specialist, and QA — each with its own model and thinking level.
 - **Enforced Pipeline:** `orchestrate` runs research → implement → security + QA in parallel → at most one fix round, and returns one consolidated report.
-- **Write Gate:** While mode is ON and no verified pipeline run has completed, `edit`, `write`, and direct `worker` launches are blocked at the tool-call boundary.
+- **Write Gate:** During an orchestrator task and no verified pipeline run has completed, `edit`, `write`, and direct `worker` launches are blocked at the tool-call boundary.
 - **Searchable Model Picker:** Pi's default selector renders every option without scrolling, so long model lists get clipped. The picker in this extension scrolls, filters as you type, and returns to the menu after a pick.
-- **Tab-Cycling Rows:** `Tab` cycles the focused row — flip the on/off toggle or step through thinking levels without leaving the menu.
+- **Tab-Cycling Rows:** `Tab` cycles the focused row — toggle optional stages or step through thinking levels without leaving the menu.
 - **Fail-Open on Misconfiguration:** A broken `pi-subagents` bridge releases the gate instead of wedging the session.
 - **Child-Process Guard:** Subagent children spawn their own Pi process; the extension detects `PI_SUBAGENT_CHILD` and stays inert there.
-- **Dependency Gate:** `pi-subagents` is required, so the extension probes the bridge and refuses to turn ON without it, warns on startup, without changing the saved operator preference.
+- **Dependency Gate:** `pi-subagents` is required and checked when the command is used. No startup probes or global activation.
 
 ---
 
@@ -67,7 +67,7 @@ Stages 3 run **in parallel**; a `blocked` verdict from either reviewer buys exac
 
 ## Enforcement Layers
 
-1. **System prompt (advisory).** Every user turn, `before_agent_start` appends the pipeline rules to `systemPromptOptions.promptGuidelines`.
+1. **System prompt (advisory).** For the command-submitted task, `before_agent_start` appends the pipeline rules to `systemPromptOptions.promptGuidelines`.
 2. **`orchestrate` tool (structural).** The whole staged fan-out runs inside the tool, so the manager cannot forget the sequence — there is nothing to remember.
 3. **`tool_call` gate (hard).** `edit`, `write`, and direct `worker` launches are rejected until a pipeline run reports explicit success.
 
@@ -118,64 +118,34 @@ Restart Pi after installing. No build step is required: Pi loads the TypeScript 
 
 ### Missing dependency
 
-`pi-subagents` is not optional: without a live bridge there is nothing to delegate to, so mode cannot be armed. When the package is absent or disabled:
+`pi-subagents` is required. If the bridge is absent, `/orchestrator <prompt>` reports an error without starting a task or blocking ordinary edits:
 
 ```bash
 pi install npm:pi-subagents   # then restart pi
 ```
 
-The extension detects this by speaking the bridge's RPC — any reply, including an RPC-level error, proves the bridge is listening. A probe timeout is the only signal treated as "missing". In that state:
-
-- the toggle row collapses to `OFF` and **Tab cannot turn mode ON**;
-- the status row reads `pi-subagents: MISSING`;
-- `/orchestrator` warns on open, and `/orchestrator on` is refused with the reason;
-- a session with saved `enabled: true` is warned if the bridge is missing; its saved preference is never overwritten by a background probe.
-
-This is a safety interlock, not decoration: a missing bridge also releases the write gate (see Enforcement Layers), so an unarmed mode is the honest state.
-
----
-
 ## Usage
 
-Run `/orchestrator` in any Pi session:
-
 ```text
-/orchestrator
+/orchestrator Fix rate limiting on the login endpoint
 ```
 
-### 1. Menu
+The prompt is passed unchanged (apart from surrounding whitespace) to the manager,
+which must call `orchestrate`. Activation is local to this task, never saved globally.
+When the agent settles (including failure or cancellation), enforcement is cleared.
+An ordinary next user prompt also clears it. Busy sessions reject new orchestration
+commands rather than steering a second writer into the current task.
+
+Without a prompt, `/orchestrator` shows usage. Configure models and optional stages:
+
 ```text
-Orchestrator
-
-  Type to search
-> Enable orchestrator         OFF
-  Manager model              9router-private/...
-  Context engine             belum dipilih
-  Lead coder                 9router-private/...
-  Security specialist        belum dipilih
-  QA                         9router-private/...
-  Thinking Context engine    default
-  Thinking Lead coder        default
-  Thinking Security specialist  default
-  Thinking QA                default
-  pi-subagents: ok
-
-  Type to search · Enter/Space to change · Esc to cancel
+/orchestrator-settings
 ```
 
-The menu scrolls, so every row stays reachable. It also has its own search: press `/` or just start typing to filter rows by name.
-
-### 2. Row Behaviour
-
-| Action | Key | Result |
-|:---|:---|:---|
-| Toggle ON/OFF | `Tab` or `Enter` | Flips the focused row and persists immediately. |
-| Cycle thinking level | `Tab` | Steps `default → off → minimal → low → medium → high → xhigh → max → default`. |
-| Pick a model | `Enter` on a model row | Opens the model picker. |
-| Search rows | type any text | Filters the menu by row label. |
-| Close | `Esc` | Returns to the prompt. |
-
-`Tab` is the shortcut for "change the thing under the cursor" — it never moves focus out of the menu, so you can toggle on/off and walk the four thinking levels without re-opening the command.
+The settings menu retains manager/role models, thinking levels, optional research,
+security and QA stages, and bridge status. There is no master ON/OFF row. `Tab`
+cycles the selected stage or thinking value; Enter on a model opens its picker.
+The settings menu scrolls but does not filter rows. Model pickers support search.
 
 ### 3. Model Picker
 ```text
@@ -190,7 +160,7 @@ cari> glm
 No pagination. The list scrolls, the current model is marked `✓`, and typing filters (case-insensitive substring, so `3.8` and `glm53` both work). Picking a model drops you back into the menu — the command does not exit — so you can set every role in one visit.
 
 ### 4. Running the pipeline
-With mode ON, ask for a code change. The manager calls `orchestrate`, which returns:
+Submit a code change using `/orchestrator <prompt>`. The manager calls `orchestrate`, which returns:
 
 ```text
 Stages: research -> implement -> security+QA (parallel) -> at most one fix round.
@@ -203,7 +173,7 @@ Stages: research -> implement -> security+QA (parallel) -> at most one fix round
 | `fixed-unverified` | A fix round succeeded but has not been independently re-reviewed. |
 | `unverified` | The pipeline could not obtain a real verdict — treat as **not** verified. |
 
-While the pipeline runs, `edit` / `write` are blocked. An explicit clean or completed-with-skips JSON verdict with successful completion unlocks editing until the next user turn. Fixed-unverified or non-JSON completion leaves the gate closed.
+While the pipeline runs, `edit` / `write` are blocked. An explicit clean or completed-with-skips JSON verdict with successful completion unlocks editing until this task ends. Fixed-unverified or non-JSON completion leaves the gate closed.
 
 ---
 
@@ -214,7 +184,6 @@ Written to `~/.pi/agent/orchestrator.json`:
 
 ```json
 {
-  "enabled": true,
   "roles": {
     "context": "provider/model",
     "coder": "provider/model",
@@ -295,13 +264,10 @@ belong in files cited by path. The final report references research/implementati
 artifacts instead of repeating their briefs. This is a prompt target, not lossy
 character truncation; reviewer findings and fix evidence remain visible.
 
-### Small changes without four agents
-Run `/orchestrator direct`, then send one small low-risk edit request (for example,
-a label or comment correction). This explicitly releases the write gate for that
-user turn only; the next user turn is gated again. The model must not use it for
-authentication, data changes, migrations or complex logic. This is an operator
-permission, not an automatic risk classifier or security sandbox. `/orchestrator off`
-remains the persistent opt-out. Read-only lookups do not need either command.
+### Ordinary changes
+Normal chat does not activate orchestration. The former `on`, `off`, and `direct`
+subcommands are removed; all nonempty `/orchestrator` arguments are task text.
+Legacy `enabled` config fields are ignored and omitted the next time settings save.
 
 ### Usage visibility
 The report includes per-stage `metrics`, summed from the bridge's real
@@ -310,26 +276,18 @@ Missing fields are `null`, not zero. `durationMs` is currently `null`: the insta
 bridge exposes timing in its workflow trace, not child results. Inspect the run
 trace for timings; the extension does not invent a duration or estimated bill.
 
-### Toggle and cancellation lifecycle
-The saved toggle is global across Pi sessions. Only explicit operator changes write
-it; background dependency probes never turn it OFF. Child processes register no
-orchestrator tools, commands or startup probes. Each tool boundary reads the current
-saved toggle rather than relying on an old in-memory value. Concurrent config writes
-use unique temporary files (last completed write wins).
-
-OFF rejects new pipeline calls and cancels active runs owned by this extension in
-this session, from either the command or menu. Abort and pipeline timeout also send
-`stop` to the bridge using the exact owned run id. A failed stop reports the run id
-for manual inspection; a stop acknowledgement is not proof that all processes have
-already exited. Shutdown requests cancellation on a best-effort basis. A toggle
-changed in another session is observed at the next tool/user boundary, not instantly
-in an otherwise idle session. No unrelated workflows are stopped.
+### Task and cancellation lifecycle
+Only `/orchestrator <prompt>` arms a task in this session. Other sessions cannot
+activate or cancel it through config. Abort and pipeline timeout send `stop` using
+the owned run id. Shutdown and agent settlement request cancellation best-effort.
+A failed stop reports the run id for inspection; acknowledgement does not prove
+all child processes have exited. No unrelated workflows are stopped.
 
 Run regression checks with Node 22.13+:
 `node --test tests/*.test.mjs` (Node's TypeScript-strip warning is expected).
 
 ### Optional roles
-`/orchestrator` now has independent **Run Context engine**, **Run Security specialist**,
+`/orchestrator-settings` has independent **Run Context engine**, **Run Security specialist**,
 and **Run QA** ON/OFF rows (Tab or Enter). Lead coder is always required. The model
 and thinking settings are retained while a role is OFF. Existing configurations
 keep all three stages ON; the saved `stages` object uses `context`, `security`, and
@@ -338,7 +296,7 @@ keep all three stages ON; the saved `stages` object uses `context`, `security`, 
 Research OFF makes the coder inspect the relevant files itself. Security and QA
 run only when enabled, in parallel when both are enabled. Turning all three OFF
 runs only the coder. Toggles are captured at pipeline launch; changes apply to the
-next run, not children already running. Use the master OFF to cancel a current run.
+next run, not children already running. Use Pi’s normal abort control to cancel a current run.
 
 Reports list `skipped` stages. A successful run with either reviewer OFF returns
 `completed-with-skips`, not `clean`, and releases the manager edit gate according
