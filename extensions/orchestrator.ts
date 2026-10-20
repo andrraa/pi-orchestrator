@@ -645,6 +645,14 @@ export default function (pi: ExtensionAPI) {
       signal?.addEventListener("abort", abort, { once: true });
       activeRuns.add(controller);
       try {
+        const enabledRoles = ROLES.filter(r => r.key === "coder" || cfg.stages[r.key] !== false);
+        const requested = enabledRoles.map(r => cfg.roles[r.key]).filter(Boolean);
+        const available = () => new Set(ctx.modelRegistry.getAvailable().map(m => `${m.provider}/${m.id}`));
+        if (requested.some(id => !available().has(id))) {
+          await ctx.modelRegistry.refresh({ allowNetwork: true });
+          const missing = requested.filter(id => !available().has(id));
+          if (missing.length) throw new Error(`Configured models unavailable after registry refresh: ${missing.join(", ")}`);
+        }
         const roleAgent = (k: RoleKey) => role(k).agent;
         const args = {
           task: params.task,

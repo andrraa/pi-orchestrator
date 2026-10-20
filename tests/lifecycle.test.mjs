@@ -33,8 +33,8 @@ function setup(child = false) {
     Type: { Object: x => x, String: x => x }, AbortController, setTimeout, clearTimeout,
   };
   vm.runInNewContext(code + '\ninstall(pi);', { ...sandbox, pi });
-  const ctx = { cwd: '/fake', isIdle: () => true, ui: { notify: text => notices.push(text) } };
-  return { handlers, commands, tools, requests, ctx, messages, notices, complete: (text, success = true) => listeners.get('subagent:async-complete')?.({ runId: 'owned-run', text, success }) };
+  const ctx = { modelRegistry: { getAvailable: () => [], refresh: async () => {} }, cwd: '/fake', isIdle: () => true, ui: { notify: text => notices.push(text) } };
+  return { setConfig: value => { config = value; }, handlers, commands, tools, requests, ctx, messages, notices, complete: (text, success = true) => listeners.get('subagent:async-complete')?.({ runId: 'owned-run', text, success }) };
 }
 test('children register nothing and cannot mutate global toggle', () => {
   const app = setup(true);
@@ -114,6 +114,24 @@ test('default model and thinking arguments are omitted and context uses scout', 
   const args = app.requests.find(r => r.method === 'spawn').params.args;
   assert.equal(args.contextAgent, 'scout');
   assert.ok(!Object.values(args).includes(''));
+  controller.abort();
+  await pending;
+});
+
+test('refreshes dynamic models before passing their exact identifier to spawn', async () => {
+  const app = setup();
+  app.setConfig({ roles: { context: 'antigravity/gemini-3.8-flash-high' }, thinking: {} });
+  let refreshed = false;
+  app.ctx.modelRegistry = {
+    getAvailable: () => refreshed ? [{ provider: 'antigravity', id: 'gemini-3.8-flash-high' }] : [],
+    refresh: async options => { assert.equal(options.allowNetwork, true); refreshed = true; },
+  };
+  await arm(app);
+  const controller = new AbortController();
+  const pending = app.tools.orchestrate.execute('', { task: 'test' }, controller.signal, undefined, app.ctx);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(refreshed, true);
+  assert.equal(app.requests.find(r => r.method === 'spawn').params.args.contextModel, 'antigravity/gemini-3.8-flash-high');
   controller.abort();
   await pending;
 });
