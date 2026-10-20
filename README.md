@@ -45,7 +45,7 @@ The manager does not run the stages itself: it calls `orchestrate(task)`, and th
 - **Stages 1-2 are sequential.** The researcher produces a brief; the coder implements from it.
 - **Stage 3 is parallel.** Both reviewers receive the same brief and run concurrently.
 - **The fix round is conditional and hardcoded to one pass.** A `blocked` verdict buys exactly one repair; there is no re-review afterwards, and no retry loop.
-- **A dead reviewer is not a clean reviewer.** A reviewer that fails or returns no verdict lands in the blocked path, and the run reports `unverified` rather than `clean`.
+- **A dead reviewer is not a clean reviewer.** A reviewer that fails, lacks evidence, or returns no valid verdict makes the result `unverified`. Infrastructure failures alone never launch a speculative code fix.
 
 If both reviewers pass and both upstream stages succeeded, the change was never at risk of being fixed blindly — the manager gets a `clean` verdict and answers.
 
@@ -55,13 +55,13 @@ If both reviewers pass and both upstream stages succeeded, the change was never 
 
 | Role | Default Agent | Stage | Responsibility |
 |:---|:---|:---|:---|
-| **Manager** | *main session* | routes + accepts | Picks the models, hands off the task, synthesizes the report, makes the final call. |
+| **Manager** | *main session* | routes + accepts | Picks the models, hands off the task, synthesizes the report, makes the final call without post-review source edits. |
 | **Context engine** | `researcher` | 1 | Gathers the files, facts, and constraints. Read-only. |
 | **Lead coder** | `worker` | 2 | Implements from that context. The only writer. |
 | **Security specialist** | `reviewer` | 3 | Audits the diff for injection, authorization, secrets, and unsafe input handling. |
 | **QA** | `reviewer` | 3 | Runs the tests and reports pass/fail evidence. |
 
-Stages 3 run **in parallel**; a `blocked` verdict from either reviewer buys exactly one fix round before the final answer.
+Stages 3 run **in parallel**; concrete blockers from valid reviewers buy at most one fix round before the final answer.
 
 ---
 
@@ -70,6 +70,8 @@ Stages 3 run **in parallel**; a `blocked` verdict from either reviewer buys exac
 1. **System prompt (advisory).** For the command-submitted task, `before_agent_start` appends the pipeline rules to `systemPromptOptions.promptGuidelines`.
 2. **`orchestrate` tool (structural).** The whole staged fan-out runs inside the tool, so the manager cannot forget the sequence — there is nothing to remember.
 3. **`tool_call` gate (hard).** `edit`, `write`, and direct `worker` launches are rejected until a pipeline run reports explicit success.
+
+> This is a routing guard, not a security sandbox: shell writes, nested workflows and other delegation tools are not comprehensively intercepted. Prompts explicitly forbid bypasses, but OS/tool isolation would be needed for a hard security boundary.
 
 > The gate deliberately fails **closed** on ambiguous completion payloads (editing stays blocked) and **open** when the RPC bridge is unavailable (editing is released).
 
@@ -301,6 +303,30 @@ next run, not children already running. Use Pi’s normal abort control to cance
 Reports list `skipped` stages. A successful run with either reviewer OFF returns
 `completed-with-skips`, not `clean`, and releases the manager edit gate according
 to the operator's chosen checks. This does **not** claim full independent review.
-A failed enabled reviewer still triggers at most one fix; fixes remain
+A failed enabled reviewer alone does not trigger a fix. Concrete code blockers from valid reviewers can trigger one fix; fixes remain
 `fixed-unverified` and do not release the gate. Missing/failed enabled checks never
 count as deliberately skipped checks.
+
+### Handoff and verification contracts
+Research reports scope and acceptance criteria, connected files/callers/tests,
+constraints and existing user changes, a minimum plan, actual verification commands,
+and uncertainties. The coder preserves unrelated changes and reports test commands,
+exit statuses and limitations. The manager does not make unreviewed final source edits.
+
+Reviewers independently inspect the actual diff and connected callers; the coder
+report is guidance, not proof. They must not edit source or revert user changes
+(normal QA test artifacts are allowed). A valid review requires a verdict, string
+findings and nonblank evidence; `clean` also requires no findings. QA evidence must
+state commands, exit statuses, results and verification limits. Essential unavailable
+checks return blocked with empty findings, not invented code defects. Evidence is
+agent-reported, not machine-attested proof that commands ran.
+
+Only concrete findings from valid blocked reviews reach the fixer, along with
+research, implementation context and reviewer evidence. Invalid or failed reviews
+are preserved in the final report. A fix reruns failing commands and relevant
+regression tests, remains limited to one pass, and always reports
+`fixed-unverified` or `unverified`, never `clean`. No automatic re-review is added.
+
+The regression suite simulates orchestration and lifecycle contracts. Real-agent
+quality, latency and cost benchmarks are not yet established; use measured task
+runs before adding routing heuristics, more agents or review loops.

@@ -5,11 +5,11 @@ const source = readFileSync(new URL('../extensions/orchestrator.ts', import.meta
 const script = source.match(/export function buildPipelineScript\(\): string \{\s*return `([\s\S]*?)`\.trim\(\);/)[1];
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 export async function simulate(overrides = {}, stages) {
-  const calls = [];
-  const good = { ok: true, output: 'brief', structuredOutput: { verdict: 'clean', findings: [] } };
-  const run = async (key) => { calls.push(key); return { ...good, ...overrides[key] }; };
-  const result = await new AsyncFunction('runs', 'args', script)({ run, all: specs => Promise.all(specs.map(s => run(s.key))) }, { task: 'test', stages });
-  return { calls, result };
+  const calls = [], tasks = {};
+  const good = { ok: true, output: 'brief', structuredOutput: { verdict: 'clean', findings: [], evidence: 'Inspected diff; node --test exited 0' } };
+  const run = async (key, spec) => { calls.push(key); tasks[key] = spec?.task; return { ...good, ...overrides[key] }; };
+  const result = await new AsyncFunction('runs', 'args', script)({ run, all: specs => Promise.all(specs.map(s => run(s.key, s))) }, { task: 'test', stages });
+  return { calls, result, tasks };
 }
 test('clean pipeline runs four stages', async () => {
   const { calls, result } = await simulate();
@@ -23,7 +23,7 @@ for (const failed of ['research', 'implement']) test(`stop after ${failed} failu
   assert.match(JSON.stringify(result), /transport failed/);
 });
 test('successful fix is not independently verified', async () => {
-  const { result } = await simulate({ security: { structuredOutput: { verdict: 'blocked', findings: ['unsafe input'] } } });
+  const { result } = await simulate({ security: { structuredOutput: { verdict: 'blocked', findings: ['unsafe input'], evidence: 'Unsafe interpolation at src/login.ts:12' } } });
   assert.equal(result.verdict, 'fixed-unverified');
 });
 test('gate requires explicit clean verdict, not just process completion', () => {
@@ -46,7 +46,26 @@ for (let mask = 0; mask < 8; mask++) test(`stage toggles combination ${mask}`, a
   assert.deepEqual(result.skipped, [!stages.context && 'research', !stages.security && 'security', !stages.qa && 'qa'].filter(Boolean));
 });
 test('disabled security does not shift QA result or trigger a missing-verdict fix', async () => {
-  const { calls, result } = await simulate({ qa: { structuredOutput: { verdict: 'blocked', findings: ['broken test'] } } }, { security: false });
+  const { calls, result } = await simulate({ qa: { structuredOutput: { verdict: 'blocked', findings: ['broken test'], evidence: 'node --test exited 1' } } }, { security: false });
   assert.deepEqual(calls, ['research', 'implement', 'qa', 'fix']);
+  assert.equal(result.verdict, 'fixed-unverified');
+});
+
+for (const failure of [
+  { ok: false, error: 'provider unavailable' },
+  { structuredOutput: undefined },
+  { structuredOutput: { verdict: 'clean', findings: [] } },
+  { structuredOutput: { verdict: 'clean', findings: [], evidence: ' ' } },
+  { structuredOutput: { verdict: 'blocked', findings: [], evidence: 'Tests unavailable' } },
+]) test('unverified review alone never launches speculative fixer: ' + JSON.stringify(failure), async () => {
+  const { calls, result } = await simulate({ security: failure });
+  assert.ok(!calls.includes('fix'));
+  assert.equal(result.verdict, 'unverified');
+});
+test('fix receives context and concrete failure evidence', async () => {
+  const { tasks, result } = await simulate({ qa: { structuredOutput: { verdict: 'blocked', findings: ['src/a.ts:1 fails'], evidence: 'node --test exited 1: assertion failed' } } });
+  assert.match(tasks.fix, /RESEARCH:/);
+  assert.match(tasks.fix, /IMPLEMENTATION:/);
+  assert.match(tasks.fix, /node --test exited 1: assertion failed/);
   assert.equal(result.verdict, 'fixed-unverified');
 });

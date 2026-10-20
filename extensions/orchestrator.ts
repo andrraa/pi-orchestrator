@@ -304,19 +304,11 @@ function role(k: RoleKey) {
 }
 
 function guidelines(cfg: Config): string[] {
-  const model = (k: RoleKey) => cfg.roles[k] || "default";
-  const level = (k: RoleKey) => cfg.thinking[k] || "default";
   return [
-    "This task was explicitly submitted with /orchestrator. You are the MANAGER: keep routing, integration, decisions, and final acceptance in this main session.",
-    "For any request that changes code, call the orchestrate tool with the task; it runs the fixed pipeline and returns the report.",
-    `1. CONTEXT — the pipeline's agent "${role("context").agent}" (model ${model("context")}, thinking ${level("context")}) gathers the files, facts, and constraints.`,
-    `2. IMPLEMENT — the pipeline's agent "${role("coder").agent}" (model ${model("coder")}, thinking ${level("coder")}) implements from that context. One writer at a time.`,
-    `3. AUDIT + TEST — after the worker reports done the pipeline runs BOTH in parallel: agent "${role("security").agent}" (model ${model("security")}, thinking ${level("security")}) audits the diff, and agent "${role("qa").agent}" (model ${model("qa")}, thinking ${level("qa")}) tests and validates it.`,
-    `Enabled stages: research=${cfg.stages.context}, security=${cfg.stages.security}, QA=${cfg.stages.qa}. Coder is always required. Disabled stages do not run; report skipped checks honestly.`,
-    "4. You synthesize the returned report, apply at most small final adjustments yourself, then give the final answer.",
-    "For this orchestrator task you may NOT edit files or launch the coder subagent directly (those tool calls are blocked) until a pipeline run has completed for this request.",
-    "Call orchestrate for the submitted task. Do not bypass the pipeline by editing directly.",
-    "If you keep a code-change request on yourself instead of running the flow, say why in one line.",
+    "The operator submitted this task with /orchestrator. You are the manager: call orchestrate with the complete task and acceptance criteria, then synthesize its report.",
+    `Enabled checks: research=${cfg.stages.context}, security=${cfg.stages.security}, QA=${cfg.stages.qa}. Report skipped or failed checks honestly; fixed-unverified is not clean.`,
+    "Do not edit source, launch writers directly, or bypass orchestration through bash, workflows or other delegation tools. The gate is a routing guard, not a security sandbox.",
+    "Do not make final source adjustments after review. Report remaining blockers and verification limits instead of claiming success or silently falling back to direct edits.",
   ];
 }
 
@@ -338,7 +330,7 @@ export function enforcementDecision(
     return {
       block: true,
       reason:
-        "This orchestrator task is active: the manager must not write code itself. Call the orchestrate tool and let the coder stage implement, then apply only final adjustments after the pipeline reports done.",
+        "This orchestrator task is active: the manager must not write code itself. Call the orchestrate tool and let the coder stage implement, then report its result without unreviewed source adjustments.",
     };
   }
   const agent = input && typeof (input as { agent?: unknown }).agent === "string" ? ((input as { agent: string }).agent).trim().toLowerCase() : undefined;
@@ -384,7 +376,7 @@ const REVIEW_SCHEMA = {
     findings: { type: "array", items: { type: "string" } },
     evidence: { type: "string" }
   },
-  required: ["verdict", "findings"],
+  required: ["verdict", "findings", "evidence"],
   additionalProperties: false
 };
 const metrics = {};
@@ -405,7 +397,7 @@ const skipped = [stages.context === false ? "research" : null, stages.security =
 const task = args.task;
 const research = stages.context === false ? { ok: true, output: "Research skipped by operator. Inspect the relevant files and constraints before editing." } : await runs.run("research", child(
   args.contextAgent,
-  "Gather the files, facts, and constraints needed to change this codebase safely." + NL + NL + "TASK:" + NL + task + NL + NL + "Report every relevant file path (with line numbers where useful), the constraints, and a concrete implementation brief for the coder. Do NOT edit any files.",
+  "Gather the files, facts, and constraints needed to change this codebase safely." + NL + NL + "TASK:" + NL + task + NL + NL + "Inspect the working tree first and identify existing user changes to preserve. Do not edit source or revert changes. Use these handoff headings: Scope and acceptance criteria; Relevant files, callers and tests; Constraints and existing user changes; Minimum implementation plan; Verification commands; Uncertainties and blockers. Cite paths and line numbers where useful. Discover the actual test commands; do not invent them.",
   args.contextModel,
   args.thinkingContext
 ));
@@ -413,7 +405,7 @@ if (stages.context !== false) record("research", research);
 if (research.ok !== true) return { metrics, verdict: "unverified", failedStage: "research", error: research.error || research.output || "no result", partialChanges: false };
 const implementation = await runs.run("implement", child(
   args.coderAgent,
-  "Make the requested change in the current working directory." + NL + NL + "TASK:" + NL + task + NL + NL + "RESEARCH (from the context stage):" + NL + research.output + NL + NL + "Edit the files yourself, run the focused tests, and report exactly which files changed and the test results.",
+  "Make the requested change in the current working directory." + NL + NL + "TASK:" + NL + task + NL + NL + "RESEARCH (from the context stage):" + NL + research.output + NL + NL + "Inspect the actual files and working tree before editing. Preserve unrelated and existing user changes; implement only the requested scope. Add a focused regression test for non-trivial changes. Run the focused tests and report changed paths, commands, exit statuses, results and any limitations.",
   args.coderModel,
   args.thinkingCoder
 ));
@@ -423,14 +415,14 @@ const reviewBrief = "TASK:" + NL + task + NL + NL + "RESEARCH SUMMARY:" + NL + r
 const specs = [
   withKey("security", child(
     args.securityAgent,
-    reviewBrief + NL + NL + "Audit the changes just made for security defects (injection, authorization, secrets, unsafe input handling, data exposure). Cite exact file:line for each finding. Set the verdict to blocked when any defect must be fixed before shipping, otherwise clean.",
+    reviewBrief + NL + NL + "Do not edit source or revert user changes. Treat the coder report as guidance, not evidence: independently inspect the actual diff and connected callers. Audit the changes just made for security defects (injection, authorization, secrets, unsafe input handling, data exposure). Each finding must identify exact file:line, a concrete failure scenario, impact and the minimum fix. Supply evidence describing the inspected paths and checks. Do not report speculative or style-only blockers. Set the verdict to blocked when any defect must be fixed before shipping, otherwise clean.",
     args.securityModel,
     args.thinkingSecurity,
     REVIEW_SCHEMA
   )),
   withKey("qa", child(
     args.qaAgent,
-    reviewBrief + NL + NL + "Independently verify the change works: run the relevant tests and commands and report pass/fail evidence with exact commands and output, plus any regressions. Set the verdict to blocked when the change is unverified or broken, otherwise clean.",
+    reviewBrief + NL + NL + "Do not edit source or revert user changes; normal test artifacts are allowed. Treat the coder report as guidance, not evidence: inspect the actual diff and connected callers independently. Verify acceptance criteria and run relevant tests. Evidence must include exact commands, exit statuses, results and verification limitations. Each finding must identify a concrete failure, location, impact and minimum fix. If essential verification cannot run, return blocked with empty findings and explain the limitation in evidence; do not invent code defects to describe infrastructure failures. Set the verdict to blocked when the change is unverified or broken, otherwise clean.",
     args.qaModel,
     args.thinkingQa,
     REVIEW_SCHEMA
@@ -440,26 +432,23 @@ const enabledSpecs = specs.filter(spec => stages[spec.key] !== false);
 const review = enabledSpecs.length ? await runs.all(enabledSpecs) : [];
 const security = stages.security === false ? { skipped: true } : record("security", review[enabledSpecs.findIndex(s => s.key === "security")]);
 const qa = stages.qa === false ? { skipped: true } : record("qa", review[enabledSpecs.findIndex(s => s.key === "qa")]);
-const securityVerdict = security && security.structuredOutput ? security.structuredOutput.verdict : undefined;
-const qaVerdict = qa && qa.structuredOutput ? qa.structuredOutput.verdict : undefined;
-// A failed or silent reviewer is NOT a clean reviewer: it must land in the blocked path.
-const securityClean = security.skipped || (security.ok === true && securityVerdict === "clean");
-const qaClean = qa.skipped || (qa.ok === true && qaVerdict === "clean");
-const stageFailure = (name, r) => r && r.ok === true ? null : name + " stage failed: " + ((r && (r.error || r.output)) || "no result");
-const upstream = [stageFailure("research", research), stageFailure("implement", implementation)].filter(Boolean);
-const blocked = upstream.length > 0 || !securityClean || !qaClean;
+function validReview(r) {
+  const out = r && r.structuredOutput;
+  return r && r.ok === true && out &&
+    (out.verdict === "clean" || out.verdict === "blocked") &&
+    Array.isArray(out.findings) && out.findings.every(f => typeof f === "string" && f.trim()) &&
+    typeof out.evidence === "string" && out.evidence.trim().length > 0 &&
+    (out.verdict !== "clean" || out.findings.length === 0);
+}
+const checks = [security, qa].filter(r => !r.skipped);
+const blocked = checks.some(r => !validReview(r) || r.structuredOutput.verdict !== "clean");
+const findings = checks.filter(r => validReview(r) && r.structuredOutput.verdict === "blocked")
+  .flatMap(r => r.structuredOutput.findings);
 let fix = null;
-if (blocked) {
-  const findings = upstream.concat(
-    [].concat(
-      security && security.structuredOutput && security.structuredOutput.findings ? security.structuredOutput.findings : [],
-      qa && qa.structuredOutput && qa.structuredOutput.findings ? qa.structuredOutput.findings : []
-    ),
-    [!security.skipped && securityVerdict === undefined ? "security reviewer returned no verdict" : null, !qa.skipped && qaVerdict === undefined ? "qa reviewer returned no verdict" : null].filter(Boolean)
-  );
+if (findings.length > 0) {
   fix = await runs.run("fix", child(
     args.coderAgent,
-    "Fix the blockers below in the current working directory, then re-run the focused tests." + NL + NL + "TASK:" + NL + task + NL + NL + "BLOCKERS (verbatim):" + NL + findings.join(NL) + NL + NL + "Report exactly which files changed and the test results.",
+    "Fix only the concrete blockers below. Inspect the working tree and preserve unrelated and existing user changes. Re-run the failing commands and relevant regression tests; report commands, exit statuses and limitations." + NL + NL + "TASK:" + NL + task + NL + NL + "RESEARCH:" + NL + research.output + NL + NL + "IMPLEMENTATION:" + NL + implementation.output + NL + NL + "REVIEW EVIDENCE:" + NL + JSON.stringify(checks.map(r => ({ review: r.structuredOutput, error: r.error }))) + NL + NL + "BLOCKERS (verbatim):" + NL + findings.join(NL) + NL + NL + "Report exactly which files changed and the test results.",
     args.coderModel,
     args.thinkingCoder
   ));
@@ -470,11 +459,12 @@ return {
   skipped,
   research: { artifacts: research.artifactPaths || [], outputReference: research.outputReference || null },
   implementation: { artifacts: implementation.artifactPaths || [], outputReference: implementation.outputReference || null },
-  security: security.skipped ? { skipped: true } : security.structuredOutput ? security.structuredOutput : security.output,
-  qa: qa.skipped ? { skipped: true } : qa.structuredOutput ? qa.structuredOutput : qa.output,
+  security: security.skipped ? { skipped: true } : { valid: !!validReview(security), review: security.structuredOutput || null, error: security.error || null, output: security.output || null },
+  qa: qa.skipped ? { skipped: true } : { valid: !!validReview(qa), review: qa.structuredOutput || null, error: qa.error || null, output: qa.output || null },
   fix: fix ? fix.output : null,
-  // "clean" only when both reviewers really returned clean and both upstream stages succeeded.
-  verdict: fix ? (fix.ok === true ? "fixed-unverified" : "unverified") : (blocked ? (securityVerdict === undefined || qaVerdict === undefined || upstream.length > 0 ? "unverified" : "blocked") : (security.skipped || qa.skipped ? "completed-with-skips" : "clean"))
+  // Fixes are never independently verified; failed/empty checks never trigger speculative edits.
+  verdict: fix ? (fix.ok === true ? "fixed-unverified" : "unverified") :
+    (blocked ? "unverified" : (security.skipped || qa.skipped ? "completed-with-skips" : "clean"))
 };
 `.trim();
 }

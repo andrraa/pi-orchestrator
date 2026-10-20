@@ -34,7 +34,7 @@ function setup(child = false) {
   };
   vm.runInNewContext(code + '\ninstall(pi);', { ...sandbox, pi });
   const ctx = { cwd: '/fake', isIdle: () => true, ui: { notify: text => notices.push(text) } };
-  return { handlers, commands, tools, requests, ctx, messages, notices };
+  return { handlers, commands, tools, requests, ctx, messages, notices, complete: (text, success = true) => listeners.get('subagent:async-complete')?.({ runId: 'owned-run', text, success }) };
 }
 test('children register nothing and cannot mutate global toggle', () => {
   const app = setup(true);
@@ -91,4 +91,16 @@ for (const reason of ['abort', 'settled', 'shutdown']) test(`${reason} stops the
   const stops = app.requests.filter(r => r.method === 'stop');
   assert.equal(stops.length, 1);
   assert.equal(stops[0].params.id, 'owned-run');
+});
+
+for (const verdict of ['clean', 'completed-with-skips', 'fixed-unverified', 'unverified', 'not-json']) test('completion gate: ' + verdict, async () => {
+  const app = setup();
+  await arm(app);
+  const pending = app.tools.orchestrate.execute('', { task: 'test' }, undefined, undefined, app.ctx);
+  await new Promise(resolve => setImmediate(resolve));
+  app.complete(verdict === 'not-json' ? 'finished' : JSON.stringify({ verdict }));
+  const result = await pending;
+  const accepted = verdict === 'clean' || verdict === 'completed-with-skips';
+  assert.equal(result.details.ok, accepted);
+  assert.equal(app.handlers.tool_call({ toolName: 'write', input: {} })?.block, accepted ? undefined : true);
 });
