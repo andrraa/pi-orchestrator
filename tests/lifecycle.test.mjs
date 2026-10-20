@@ -104,3 +104,16 @@ for (const verdict of ['clean', 'completed-with-skips', 'fixed-unverified', 'unv
   assert.equal(result.details.ok, accepted);
   assert.equal(app.handlers.tool_call({ toolName: 'write', input: {} })?.block, accepted ? undefined : true);
 });
+
+test('default model and thinking arguments are omitted and context uses scout', async () => {
+  const app = setup();
+  await arm(app);
+  const controller = new AbortController();
+  const pending = app.tools.orchestrate.execute('', { task: 'test' }, controller.signal, undefined, app.ctx);
+  await new Promise(resolve => setImmediate(resolve));
+  const args = app.requests.find(r => r.method === 'spawn').params.args;
+  assert.equal(args.contextAgent, 'scout');
+  assert.ok(!Object.values(args).includes(''));
+  controller.abort();
+  await pending;
+});

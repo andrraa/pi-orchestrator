@@ -69,3 +69,18 @@ test('fix receives context and concrete failure evidence', async () => {
   assert.match(tasks.fix, /node --test exited 1: assertion failed/);
   assert.equal(result.verdict, 'fixed-unverified');
 });
+
+for (const stage of ['research', 'implement', 'security', 'qa', 'fix']) test('stage exception becomes unverified report: ' + stage, async () => {
+  const calls = [];
+  const run = async key => {
+    calls.push(key);
+    if (key === stage) throw new Error('upstream stream truncated');
+    return { ok: true, output: 'brief', structuredOutput: { verdict: stage === 'fix' && key === 'qa' ? 'blocked' : 'clean', findings: stage === 'fix' && key === 'qa' ? ['src/a.js:1 concrete defect'] : [], evidence: 'node --test exited 0' } };
+  };
+  const result = await new AsyncFunction('runs', 'args', script)({ run }, { task: 'test' });
+  assert.equal(result.verdict, 'unverified');
+  assert.match(JSON.stringify(result), /upstream stream truncated/);
+  if (stage === 'research') assert.deepEqual(calls, ['research']);
+  if (stage === 'implement') assert.deepEqual(calls, ['research', 'implement']);
+  if (stage === 'security' || stage === 'qa') assert.ok(!calls.includes('fix'));
+});

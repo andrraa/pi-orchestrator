@@ -42,7 +42,7 @@ A rule written in `AGENTS.md` is soft context: the main model may read it and st
 
 The manager does not run the stages itself: it calls `orchestrate(task)`, and the whole sequence executes inside the tool. Each stage's output is handed to the next, so later stages can only reason about work that actually happened.
 
-- **Stages 1-2 are sequential.** The researcher produces a brief; the coder implements from it.
+- **Stages 1-2 are sequential.** The codebase scout produces a brief; the coder implements from it.
 - **Stage 3 is parallel.** Both reviewers receive the same brief and run concurrently.
 - **The fix round is conditional and hardcoded to one pass.** A `blocked` verdict buys exactly one repair; there is no re-review afterwards, and no retry loop.
 - **A dead reviewer is not a clean reviewer.** A reviewer that fails, lacks evidence, or returns no valid verdict makes the result `unverified`. Infrastructure failures alone never launch a speculative code fix.
@@ -56,7 +56,7 @@ If both reviewers pass and both upstream stages succeeded, the change was never 
 | Role | Default Agent | Stage | Responsibility |
 |:---|:---|:---|:---|
 | **Manager** | *main session* | routes + accepts | Picks the models, hands off the task, synthesizes the report, makes the final call without post-review source edits. |
-| **Context engine** | `researcher` | 1 | Gathers the files, facts, and constraints. Read-only. |
+| **Context engine** | `scout` | 1 | Gathers the files, facts, and constraints. Read-only. |
 | **Lead coder** | `worker` | 2 | Implements from that context. The only writer. |
 | **Security specialist** | `reviewer` | 3 | Audits the diff for injection, authorization, secrets, and unsafe input handling. |
 | **QA** | `reviewer` | 3 | Runs the tests and reports pass/fail evidence. |
@@ -330,3 +330,13 @@ regression tests, remains limited to one pass, and always reports
 The regression suite simulates orchestration and lifecycle contracts. Real-agent
 quality, latency and cost benchmarks are not yet established; use measured task
 runs before adding routing heuristics, more agents or review loops.
+
+### Runtime stage failures
+The context role uses pi-subagents' codebase `scout`, not its web-oriented
+`researcher`. Research stays within task scope; standalone temporary fixtures do
+not require auditing the host repository. Empty model/thinking arguments are
+omitted so the bridge can apply defaults. Stage exceptions are captured as failed
+results: upstream failures stop downstream work, while reviewer failures preserve
+independent sibling results without launching a speculative fix. Failed fixer
+reports retain the original error. This does not repair upstream provider streams;
+a transport failure still yields an honest `unverified` result.

@@ -21,7 +21,7 @@ interface Config {
 }
 
 const ROLES: { key: RoleKey; label: string; agent: string; hint: string }[] = [
-  { key: "context", label: "Context engine", agent: "researcher", hint: "stage 1: gather files, facts, constraints" },
+  { key: "context", label: "Context engine", agent: "scout", hint: "stage 1: gather files, facts, constraints" },
   { key: "coder", label: "Lead coder", agent: "worker", hint: "stage 2: implement from the context" },
   { key: "security", label: "Security specialist", agent: "reviewer", hint: "stage 3: audit the diff for security holes" },
   { key: "qa", label: "QA", agent: "reviewer", hint: "stage 3: test and validate the diff" },
@@ -392,18 +392,25 @@ function record(key, result) {
   metrics[key] = { usage, durationMs: null, runId: result.runId || null };
   return result;
 }
+async function runStage(key, spec) {
+  try {
+    return await runs.run(key, spec);
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
 const stages = args.stages || {};
 const skipped = [stages.context === false ? "research" : null, stages.security === false ? "security" : null, stages.qa === false ? "qa" : null].filter(Boolean);
 const task = args.task;
-const research = stages.context === false ? { ok: true, output: "Research skipped by operator. Inspect the relevant files and constraints before editing." } : await runs.run("research", child(
+const research = stages.context === false ? { ok: true, output: "Research skipped by operator. Inspect the relevant files and constraints before editing." } : await runStage("research", child(
   args.contextAgent,
-  "Gather the files, facts, and constraints needed to change this codebase safely." + NL + NL + "TASK:" + NL + task + NL + NL + "Inspect the working tree first and identify existing user changes to preserve. Do not edit source or revert changes. Use these handoff headings: Scope and acceptance criteria; Relevant files, callers and tests; Constraints and existing user changes; Minimum implementation plan; Verification commands; Uncertainties and blockers. Cite paths and line numbers where useful. Discover the actual test commands; do not invent them.",
+  "Gather the files, facts, and constraints needed to change this codebase safely." + NL + NL + "TASK:" + NL + task + NL + NL + "Stay within the requested scope. For standalone temporary fixtures, inspect only the runtime and fixture requirements, not the host repository. For repository changes, inspect the working tree and identify existing user changes to preserve. Do not edit source or revert changes. Use these handoff headings: Scope and acceptance criteria; Relevant files, callers and tests; Constraints and existing user changes; Minimum implementation plan; Verification commands; Uncertainties and blockers. Cite paths and line numbers where useful. Discover the actual test commands; do not invent them.",
   args.contextModel,
   args.thinkingContext
 ));
 if (stages.context !== false) record("research", research);
 if (research.ok !== true) return { metrics, verdict: "unverified", failedStage: "research", error: research.error || research.output || "no result", partialChanges: false };
-const implementation = await runs.run("implement", child(
+const implementation = await runStage("implement", child(
   args.coderAgent,
   "Make the requested change in the current working directory." + NL + NL + "TASK:" + NL + task + NL + NL + "RESEARCH (from the context stage):" + NL + research.output + NL + NL + "Inspect the actual files and working tree before editing. Preserve unrelated and existing user changes; implement only the requested scope. Add a focused regression test for non-trivial changes. Run the focused tests and report changed paths, commands, exit statuses, results and any limitations.",
   args.coderModel,
@@ -429,7 +436,7 @@ const specs = [
   ))
 ];
 const enabledSpecs = specs.filter(spec => stages[spec.key] !== false);
-const review = enabledSpecs.length ? await runs.all(enabledSpecs) : [];
+const review = enabledSpecs.length ? await Promise.all(enabledSpecs.map(spec => runStage(spec.key, spec))) : [];
 const security = stages.security === false ? { skipped: true } : record("security", review[enabledSpecs.findIndex(s => s.key === "security")]);
 const qa = stages.qa === false ? { skipped: true } : record("qa", review[enabledSpecs.findIndex(s => s.key === "qa")]);
 function validReview(r) {
@@ -446,7 +453,7 @@ const findings = checks.filter(r => validReview(r) && r.structuredOutput.verdict
   .flatMap(r => r.structuredOutput.findings);
 let fix = null;
 if (findings.length > 0) {
-  fix = await runs.run("fix", child(
+  fix = await runStage("fix", child(
     args.coderAgent,
     "Fix only the concrete blockers below. Inspect the working tree and preserve unrelated and existing user changes. Re-run the failing commands and relevant regression tests; report commands, exit statuses and limitations." + NL + NL + "TASK:" + NL + task + NL + NL + "RESEARCH:" + NL + research.output + NL + NL + "IMPLEMENTATION:" + NL + implementation.output + NL + NL + "REVIEW EVIDENCE:" + NL + JSON.stringify(checks.map(r => ({ review: r.structuredOutput, error: r.error }))) + NL + NL + "BLOCKERS (verbatim):" + NL + findings.join(NL) + NL + NL + "Report exactly which files changed and the test results.",
     args.coderModel,
@@ -461,7 +468,7 @@ return {
   implementation: { artifacts: implementation.artifactPaths || [], outputReference: implementation.outputReference || null },
   security: security.skipped ? { skipped: true } : { valid: !!validReview(security), review: security.structuredOutput || null, error: security.error || null, output: security.output || null },
   qa: qa.skipped ? { skipped: true } : { valid: !!validReview(qa), review: qa.structuredOutput || null, error: qa.error || null, output: qa.output || null },
-  fix: fix ? fix.output : null,
+  fix: fix ? { output: fix.output || null, error: fix.error || null } : null,
   // Fixes are never independently verified; failed/empty checks never trigger speculative edits.
   verdict: fix ? (fix.ok === true ? "fixed-unverified" : "unverified") :
     (blocked ? "unverified" : (security.skipped || qa.skipped ? "completed-with-skips" : "clean"))
@@ -610,7 +617,7 @@ export default function (pi: ExtensionAPI) {
     label: "Orchestrate",
     description:
       "Run the enforced fixed pipeline for a code change on this machine: research -> implement -> security + QA in parallel -> at most one fix round. One call runs the whole flow and returns the report.",
-    promptSnippet: "Run the enforced researcher->worker->security+QA pipeline",
+    promptSnippet: "Run the enforced scout->worker->security+QA pipeline",
     promptGuidelines: [
       "For tasks explicitly submitted with /orchestrator, run code changes through the orchestrate tool; you may not edit files or launch the coder (worker) subagent directly until a pipeline run has completed for this request.",
     ],
@@ -658,14 +665,16 @@ export default function (pi: ExtensionAPI) {
           thinkingQa: cfg.thinking.qa,
         };
 
-        const spawn = await rpcRequest(pi, "spawn", { script: buildPipelineScript(), args, cwd: ctx.cwd }, SPAWN_TIMEOUT_MS);
+        // The bridge rejects empty string args; absent model/thinking means default.
+        const workflowArgs = Object.fromEntries(Object.entries(args).filter(([, value]) => value !== ""));
+        const spawn = await rpcRequest(pi, "spawn", { script: buildPipelineScript(), args: workflowArgs, cwd: ctx.cwd }, SPAWN_TIMEOUT_MS);
         if (!spawn.ok) {
           pipelineState.unavailable = true;
           return {
             content: [
               {
                 type: "text" as const,
-                text: `The pi-subagents RPC bridge is unavailable, so the orchestrate pipeline cannot start (${spawn.error}). Check that pi-subagents is installed and enabled; file edits are no longer blocked for this session.`,
+                text: `The pi-subagents spawn request failed, so the orchestrate pipeline cannot start (${spawn.error}). Check that pi-subagents is installed and enabled; file edits are no longer blocked for this session.`,
               },
             ],
             details: { runId: undefined, ok: false },
