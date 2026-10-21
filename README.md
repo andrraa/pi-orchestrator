@@ -38,16 +38,22 @@ A rule written in `AGENTS.md` is soft context: the main model may read it and st
 
 ## How It Works
 
-![How orchestration works](assets/pipeline.svg)
+```mermaid
+flowchart TD
+    U[User request] --> M["Manager · main Pi session<br/>Reads code · identifies callers and constraints<br/>Defines acceptance criteria"]
+    M -->|complete task brief| C["1 · Lead coder<br/>Implement"]
+    C --> S["2 · Security<br/>Audit the diff"]
+    C --> Q["2 · QA<br/>Run relevant tests"]
+    S --> D{Review result}
+    Q --> D
+    D -->|clean| A["4 · Manager<br/>Final answer"]
+    D -->|concrete blockers| F["3 · Lead coder<br/>Fix once"]
+    F --> A
+    D -->|failure or invalid evidence| V["Unverified"]
+    V --> A
+```
 
-The manager does not run the stages itself: it calls `orchestrate(task)`, and the whole sequence executes inside the tool. Each stage's output is handed to the next, so later stages can only reason about work that actually happened.
-
-- **The manager owns context.** It inspects the relevant code and includes its findings and acceptance criteria in the task passed to `orchestrate`.
-- **The review stage is parallel.** Security and QA receive the same manager context and implementation report.
-- **The fix round is conditional and hardcoded to one pass.** A `blocked` verdict buys exactly one repair; there is no re-review afterwards, and no retry loop.
-- **A dead reviewer is not a clean reviewer.** A reviewer that fails, lacks evidence, or returns no valid verdict makes the result `unverified`. Infrastructure failures alone never launch a speculative code fix.
-
-If both reviewers pass and both upstream stages succeeded, the change was never at risk of being fixed blindly — the manager gets a `clean` verdict and answers.
+> The manager owns context; there is no separate context-researcher agent. Security and QA run in parallel, and the write gate remains active until the pipeline completes.
 
 ---
 
@@ -247,8 +253,7 @@ pi-orchestrator/
 ├── LICENSE                   # MIT License
 ├── package.json              # Pi package manifest (extensions + peer dependencies)
 ├── assets/
-│   ├── banner.svg            # README banner
-│   └── pipeline.svg          # "How It Works" diagram
+│   └── banner.svg            # README banner
 └── extensions/
     └── orchestrator.ts       # /orchestrator command + orchestrate tool
 ```
