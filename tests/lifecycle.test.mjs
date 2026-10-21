@@ -107,14 +107,14 @@ for (const verdict of ['clean', 'completed-with-skips', 'fixed-unverified', 'unv
   assert.equal(app.handlers.tool_call({ toolName: 'write', input: {} })?.block, accepted ? undefined : true);
 });
 
-test('default model and thinking arguments are omitted and context uses scout', async () => {
+test('default model and thinking arguments are omitted', async () => {
   const app = setup();
   await arm(app);
   const controller = new AbortController();
   const pending = app.tools.orchestrate.execute('', { task: 'test' }, controller.signal, undefined, app.ctx);
   await new Promise(resolve => setImmediate(resolve));
   const args = app.requests.find(r => r.method === 'spawn').params.args;
-  assert.equal(args.contextAgent, 'scout');
+  assert.ok(!Object.keys(args).some(key => key.toLowerCase().includes('context')));
   assert.equal(args.qaAgent, 'oracle');
   assert.ok(!Object.values(args).includes(''));
   controller.abort();
@@ -123,7 +123,7 @@ test('default model and thinking arguments are omitted and context uses scout', 
 
 test('refreshes dynamic models before passing their exact identifier to spawn', async () => {
   const app = setup();
-  app.setConfig({ roles: { context: 'antigravity/gemini-3.8-flash-high' }, thinking: {} });
+  app.setConfig({ roles: { coder: 'antigravity/gemini-3.8-flash-high' }, thinking: {} });
   let refreshed = false;
   app.ctx.modelRegistry = {
     getAvailable: () => refreshed ? [{ provider: 'antigravity', id: 'gemini-3.8-flash-high' }] : [],
@@ -134,7 +134,7 @@ test('refreshes dynamic models before passing their exact identifier to spawn', 
   const pending = app.tools.orchestrate.execute('', { task: 'test' }, controller.signal, undefined, app.ctx);
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(refreshed, true);
-  assert.equal(app.requests.find(r => r.method === 'spawn').params.args.contextModel, 'antigravity/gemini-3.8-flash-high');
+  assert.equal(app.requests.find(r => r.method === 'spawn').params.args.coderModel, 'antigravity/gemini-3.8-flash-high');
   controller.abort();
   await pending;
 });

@@ -11,14 +11,14 @@ export async function simulate(overrides = {}, stages, extraArgs = {}) {
   const result = await new AsyncFunction('runs', 'args', script)({ run, all: specs => Promise.all(specs.map(s => run(s.key, s))) }, { task: 'test', stages, ...extraArgs });
   return { calls, result, tasks, specs };
 }
-test('clean pipeline runs four stages', async () => {
+test('clean pipeline runs three stages', async () => {
   const { calls, result } = await simulate();
-  assert.deepEqual(calls, ['research', 'implement', 'security', 'qa']);
+  assert.deepEqual(calls, ['implement', 'security', 'qa']);
   assert.equal(result.verdict, 'clean');
 });
-for (const failed of ['research', 'implement']) test(`stop after ${failed} failure`, async () => {
-  const { calls, result } = await simulate({ [failed]: { ok: false, error: 'transport failed' } });
-  assert.deepEqual(calls, failed === 'research' ? ['research'] : ['research', 'implement']);
+test('stop after implement failure', async () => {
+  const { calls, result } = await simulate({ implement: { ok: false, error: 'transport failed' } });
+  assert.deepEqual(calls, ['implement']);
   assert.equal(result.verdict, 'unverified');
   assert.match(JSON.stringify(result), /transport failed/);
 });
@@ -31,23 +31,23 @@ test('gate requires explicit clean verdict, not just process completion', () => 
 });
 test('usage comes from runtime rows and missing values remain unknown', async () => {
   const usage = { input: 10, output: 4, cacheRead: 2, cacheWrite: 0, cost: 0.01, turns: 1 };
-  const { result } = await simulate({ research: { results: [{ usage }, { usage }] } });
-  assert.equal(result.metrics.research.usage.input, 20);
-  assert.equal(result.metrics.research.usage.cost, 0.02);
+  const { result } = await simulate({ implement: { results: [{ usage }, { usage }] } });
+  assert.equal(result.metrics.implement.usage.input, 20);
+  assert.equal(result.metrics.implement.usage.cost, 0.02);
   assert.equal(result.metrics.qa.usage.input, null);
   assert.equal(result.metrics.qa.durationMs, null);
 });
 
-for (let mask = 0; mask < 8; mask++) test(`stage toggles combination ${mask}`, async () => {
-  const stages = { context: !!(mask & 1), security: !!(mask & 2), qa: !!(mask & 4) };
+for (let mask = 0; mask < 4; mask++) test(`stage toggles combination ${mask}`, async () => {
+  const stages = { security: !!(mask & 1), qa: !!(mask & 2) };
   const { calls, result } = await simulate({}, stages);
-  assert.deepEqual(calls, [stages.context && 'research', 'implement', stages.security && 'security', stages.qa && 'qa'].filter(Boolean));
+  assert.deepEqual(calls, ['implement', stages.security && 'security', stages.qa && 'qa'].filter(Boolean));
   assert.equal(result.verdict, stages.security && stages.qa ? 'clean' : 'completed-with-skips');
-  assert.deepEqual(result.skipped, [!stages.context && 'research', !stages.security && 'security', !stages.qa && 'qa'].filter(Boolean));
+  assert.deepEqual(result.skipped, [!stages.security && 'security', !stages.qa && 'qa'].filter(Boolean));
 });
 test('disabled security does not shift QA result or trigger a missing-verdict fix', async () => {
   const { calls, result } = await simulate({ qa: { structuredOutput: { verdict: 'blocked', findings: ['broken test'], evidence: 'node --test exited 1' } } }, { security: false });
-  assert.deepEqual(calls, ['research', 'implement', 'qa', 'fix']);
+  assert.deepEqual(calls, ['implement', 'qa', 'fix']);
   assert.equal(result.verdict, 'fixed-unverified');
 });
 
@@ -62,15 +62,15 @@ for (const failure of [
   assert.ok(!calls.includes('fix'));
   assert.equal(result.verdict, 'unverified');
 });
-test('fix receives context and concrete failure evidence', async () => {
+test('fix receives manager context and concrete failure evidence', async () => {
   const { tasks, result } = await simulate({ qa: { structuredOutput: { verdict: 'blocked', findings: ['src/a.ts:1 fails'], evidence: 'node --test exited 1: assertion failed' } } });
-  assert.match(tasks.fix, /RESEARCH:/);
+  assert.match(tasks.fix, /TASK AND MANAGER CONTEXT:/);
   assert.match(tasks.fix, /IMPLEMENTATION:/);
   assert.match(tasks.fix, /node --test exited 1: assertion failed/);
   assert.equal(result.verdict, 'fixed-unverified');
 });
 
-for (const stage of ['research', 'implement', 'security', 'qa', 'fix']) test('stage exception becomes unverified report: ' + stage, async () => {
+for (const stage of ['implement', 'security', 'qa', 'fix']) test('stage exception becomes unverified report: ' + stage, async () => {
   const calls = [];
   const run = async key => {
     calls.push(key);
@@ -80,8 +80,7 @@ for (const stage of ['research', 'implement', 'security', 'qa', 'fix']) test('st
   const result = await new AsyncFunction('runs', 'args', script)({ run }, { task: 'test' });
   assert.equal(result.verdict, 'unverified');
   assert.match(JSON.stringify(result), /upstream stream truncated/);
-  if (stage === 'research') assert.deepEqual(calls, ['research']);
-  if (stage === 'implement') assert.deepEqual(calls, ['research', 'implement']);
+  if (stage === 'implement') assert.deepEqual(calls, ['implement']);
   if (stage === 'security' || stage === 'qa') assert.ok(!calls.includes('fix'));
 });
 

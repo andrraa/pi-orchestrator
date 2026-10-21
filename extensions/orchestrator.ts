@@ -10,28 +10,27 @@ import { Container, type SettingItem, SettingsList } from "@earendil-works/pi-tu
 
 const CONFIG_PATH = path.join(os.homedir(), ".pi", "agent", "orchestrator.json");
 
-type RoleKey = "context" | "coder" | "security" | "qa";
+type RoleKey = "coder" | "security" | "qa";
 
-const ROLE_KEYS: RoleKey[] = ["context", "coder", "security", "qa"];
+const ROLE_KEYS: RoleKey[] = ["coder", "security", "qa"];
 const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
 interface Config {
   roles: Record<RoleKey, string>;
   thinking: Record<RoleKey, string>;
-  stages: Record<"context" | "security" | "qa", boolean>;
+  stages: Record<"security" | "qa", boolean>;
 }
 
 const ROLES: { key: RoleKey; label: string; agent: string; hint: string }[] = [
-  { key: "context", label: "Context engine", agent: "scout", hint: "stage 1: gather files, facts, constraints" },
-  { key: "coder", label: "Lead coder", agent: "worker", hint: "stage 2: implement from the context" },
-  { key: "security", label: "Security specialist", agent: "reviewer", hint: "stage 3: audit the diff for security holes" },
-  { key: "qa", label: "QA", agent: "oracle", hint: "stage 3: test and validate the diff" },
+  { key: "coder", label: "Lead coder", agent: "worker", hint: "stage 1: implement from manager context" },
+  { key: "security", label: "Security specialist", agent: "reviewer", hint: "stage 2: audit the diff for security holes" },
+  { key: "qa", label: "QA", agent: "oracle", hint: "stage 2: test and validate the diff" },
 ];
 
 const DEFAULTS: Config = {
-  stages: { context: true, security: true, qa: true },
-  roles: { context: "", coder: "", security: "", qa: "" },
-  thinking: { context: "", coder: "", security: "", qa: "" },
+  stages: { security: true, qa: true },
+  roles: { coder: "", security: "", qa: "" },
+  thinking: { coder: "", security: "", qa: "" },
 };
 
 // --- pi-subagents RPC bridge (in-process event bus) -------------------------
@@ -81,7 +80,11 @@ function probeBridge(pi: ExtensionAPI): Promise<boolean> {
 function load(): Config {
   try {
     const raw = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"));
-    return { roles: { ...DEFAULTS.roles, ...raw.roles }, thinking: normalizeThinking(raw.thinking), stages: { context: raw.stages?.context !== false, security: raw.stages?.security !== false, qa: raw.stages?.qa !== false } };
+    return {
+      roles: { coder: raw.roles?.coder ?? "", security: raw.roles?.security ?? "", qa: raw.roles?.qa ?? "" },
+      thinking: normalizeThinking(raw.thinking),
+      stages: { security: raw.stages?.security !== false, qa: raw.stages?.qa !== false },
+    };
   } catch {
     return JSON.parse(JSON.stringify(DEFAULTS)) as Config;
   }
@@ -206,7 +209,7 @@ function menuOnce(ctx: ExtensionCommandContext, unavailable: boolean): Promise<s
     const items: SettingItem[] = [
       // a one-element `values` array makes Enter fire onChange without moving focus
       { id: MANAGER_ID, label: "Manager model", currentValue: manager, values: [manager] },
-      ...(["context", "security", "qa"] as const).map((key) => ({
+      ...(["security", "qa"] as const).map((key) => ({
         id: `stage:${key}`, label: `Run ${role(key).label}`,
         currentValue: cfg.stages[key] ? "ON" : "OFF", values: ["ON", "OFF"],
       })),
@@ -306,8 +309,8 @@ function role(k: RoleKey) {
 
 function guidelines(cfg: Config): string[] {
   return [
-    "The operator submitted this task with /orchestrator. You are the manager: call orchestrate with the complete task and acceptance criteria, then synthesize its report.",
-    `Enabled checks: research=${cfg.stages.context}, security=${cfg.stages.security}, QA=${cfg.stages.qa}. Report skipped or failed checks honestly; fixed-unverified is not clean.`,
+    "The operator submitted this task with /orchestrator. You are the manager: inspect the relevant code and callers yourself, then call orchestrate with the complete task, context, and acceptance criteria before synthesizing its report.",
+    `Enabled checks: security=${cfg.stages.security}, QA=${cfg.stages.qa}. Report skipped or failed checks honestly; fixed-unverified is not clean.`,
     "Do not edit source, launch writers directly, or bypass orchestration through bash, workflows or other delegation tools. The gate is a routing guard, not a security sandbox.",
     "Do not make final source adjustments after review. Report remaining blockers and verification limits instead of claiming success or silently falling back to direct edits.",
   ];
@@ -422,21 +425,13 @@ function runStage(key, spec) {
   }));
 }
 const stages = args.stages || {};
-const skipped = [stages.context === false ? "research" : null, stages.security === false ? "security" : null, stages.qa === false ? "qa" : null].filter(Boolean);
+const skipped = [stages.security === false ? "security" : null, stages.qa === false ? "qa" : null].filter(Boolean);
 const task = args.task;
 // Host-executed gate: the runtime's exit status, not the coder's claim, decides this.
 const verify = typeof args.verify === "string" && args.verify.trim() ? args.verify.trim() : null;
-const research = stages.context === false ? { ok: true, output: "Research skipped by operator. Inspect the relevant files and constraints before editing." } : await runStage("research", child(
-  args.contextAgent,
-  "Gather the files, facts, and constraints needed to change this codebase safely." + NL + NL + "TASK:" + NL + task + NL + NL + "Stay within the requested scope. Read-only repository metadata (git status, git log, ls) is allowed. For standalone temporary fixtures, inspect only the runtime and fixture requirements, not the host repository source. For repository changes, identify existing user changes to preserve. Do not edit source or revert changes. Use these handoff headings: Scope and acceptance criteria; Relevant files, callers and tests; Constraints and existing user changes; Minimum implementation plan; Verification commands; Uncertainties and blockers. Cite paths and line numbers where useful. Discover the actual test commands; do not invent them.",
-  args.contextModel,
-  args.thinkingContext
-));
-if (stages.context !== false) record("research", research);
-if (research.ok !== true) return { metrics, verdict: "unverified", failedStage: "research", error: research.error || research.output || "no result", partialChanges: false };
 const implementSpec = child(
   args.coderAgent,
-  "Make the requested change in the current working directory." + NL + NL + "TASK:" + NL + task + NL + NL + "RESEARCH (from the context stage):" + NL + research.output + NL + NL + "Inspect the actual files and working tree before editing. Preserve unrelated and existing user changes; implement only the requested scope. Add a focused regression test for non-trivial changes. Run the focused tests and report changed paths, commands, exit statuses, results and any limitations.",
+  "Make the requested change in the current working directory." + NL + NL + "TASK AND MANAGER CONTEXT:" + NL + task + NL + NL + "Inspect the actual files and working tree before editing. Preserve unrelated and existing user changes; implement only the requested scope. Add a focused regression test for non-trivial changes. Run the focused tests and report changed paths, commands, exit statuses, results and any limitations.",
   args.coderModel,
   args.thinkingCoder
 );
@@ -446,7 +441,7 @@ record("implement", implementation);
 const verification = verify ? { command: verify, passed: implementation.ok === true } : null;
 if (implementation.ok !== true) return { metrics, verification, verdict: "unverified", failedStage: "implement", error: implementation.error || implementation.output || "no result", partialChanges: true };
 const verifyLine = verify ? NL + NL + "HOST GATE (machine-executed by the runtime; a nonzero exit fails this pipeline):" + NL + verify : "";
-const reviewBrief = "TASK:" + NL + task + verifyLine + NL + NL + "RESEARCH SUMMARY:" + NL + research.output + NL + NL + "IMPLEMENTATION REPORT (coder):" + NL + implementation.output;
+const reviewBrief = "TASK AND MANAGER CONTEXT:" + NL + task + verifyLine + NL + NL + "IMPLEMENTATION REPORT (coder):" + NL + implementation.output;
 const specs = [
   withKey("security", child(
     args.securityAgent,
@@ -483,7 +478,7 @@ let fix = null;
 if (findings.length > 0) {
   const fixSpec = child(
     args.coderAgent,
-    "Fix only the concrete blockers below. Inspect the working tree and preserve unrelated and existing user changes. Re-run the failing commands and relevant regression tests; report commands, exit statuses and limitations." + NL + NL + "TASK:" + NL + task + NL + NL + "RESEARCH:" + NL + research.output + NL + NL + "IMPLEMENTATION:" + NL + implementation.output + NL + NL + "REVIEW EVIDENCE:" + NL + JSON.stringify(checks.map(r => ({ review: r.structuredOutput, error: r.error }))) + NL + NL + "BLOCKERS (verbatim):" + NL + findings.join(NL) + NL + NL + "Report exactly which files changed and the test results.",
+    "Fix only the concrete blockers below. Inspect the working tree and preserve unrelated and existing user changes. Re-run the failing commands and relevant regression tests; report commands, exit statuses and limitations." + NL + NL + "TASK AND MANAGER CONTEXT:" + NL + task + NL + NL + "IMPLEMENTATION:" + NL + implementation.output + NL + NL + "REVIEW EVIDENCE:" + NL + JSON.stringify(checks.map(r => ({ review: r.structuredOutput, error: r.error }))) + NL + NL + "BLOCKERS (verbatim):" + NL + findings.join(NL) + NL + NL + "Report exactly which files changed and the test results.",
     args.coderModel,
     args.thinkingCoder
   );
@@ -495,7 +490,6 @@ return {
   metrics,
   skipped,
   verification,
-  research: { artifacts: research.artifactPaths || [], outputReference: research.outputReference || null },
   implementation: { artifacts: implementation.artifactPaths || [], outputReference: implementation.outputReference || null },
   security: security.skipped ? { skipped: true } : { valid: !!validReview(security), review: security.structuredOutput || null, error: security.error || null, output: security.output || null },
   qa: qa.skipped ? { skipped: true } : { valid: !!validReview(qa), review: qa.structuredOutput || null, error: qa.error || null, output: qa.output || null },
@@ -647,8 +641,8 @@ export default function (pi: ExtensionAPI) {
     name: "orchestrate",
     label: "Orchestrate",
     description:
-      "Run the enforced fixed pipeline for a code change on this machine: research -> implement -> security + QA in parallel -> at most one fix round. One call runs the whole flow and returns the report.",
-    promptSnippet: "Run the enforced scout->worker->security+QA pipeline",
+      "Run the enforced fixed pipeline for a code change on this machine: implement -> security + QA in parallel -> at most one fix round. The manager must include its codebase context in the task. One call runs the whole flow and returns the report.",
+    promptSnippet: "Run the enforced worker->security+QA pipeline",
     promptGuidelines: [
       "For tasks explicitly submitted with /orchestrator, run code changes through the orchestrate tool; you may not edit files or launch the coder (worker) subagent directly until a pipeline run has completed for this request.",
     ],
@@ -679,7 +673,7 @@ export default function (pi: ExtensionAPI) {
       signal?.addEventListener("abort", abort, { once: true });
       activeRuns.add(controller);
       try {
-        const enabledRoles = ROLES.filter(r => r.key === "coder" || cfg.stages[r.key] !== false);
+        const enabledRoles = ROLES.filter(r => r.key === "coder" || cfg.stages[r.key as keyof Config["stages"]] !== false);
         const requested = enabledRoles.map(r => cfg.roles[r.key]).filter(Boolean);
         const available = () => new Set(ctx.modelRegistry.getAvailable().map(m => `${m.provider}/${m.id}`));
         if (requested.some(id => !available().has(id))) {
@@ -692,9 +686,6 @@ export default function (pi: ExtensionAPI) {
           task: params.task,
           verify: params.verify,
           stages: cfg.stages,
-          contextAgent: roleAgent("context"),
-          contextModel: cfg.roles.context,
-          thinkingContext: cfg.thinking.context,
           coderAgent: roleAgent("coder"),
           coderModel: cfg.roles.coder,
           thinkingCoder: cfg.thinking.coder,

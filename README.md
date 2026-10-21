@@ -25,8 +25,8 @@ A rule written in `AGENTS.md` is soft context: the main model may read it and st
 
 ### Features
 - **Per-task command:** `/orchestrator <prompt>` runs one task; ordinary chat stays unaffected. Settings persist, activation does not.
-- **Four Configurable Roles:** Context engine, lead coder, security specialist, and QA — each with its own model and thinking level.
-- **Enforced Pipeline:** `orchestrate` runs research → implement → security + QA in parallel → at most one fix round, and returns one consolidated report.
+- **Four Roles:** Manager, lead coder, security specialist, and QA. Child roles have configurable models and thinking levels; the manager is the main session model.
+- **Enforced Pipeline:** The manager gathers context, then `orchestrate` runs implement → security + QA in parallel → at most one fix round and returns one consolidated report.
 - **Write Gate:** During an orchestrator task and no verified pipeline run has completed, `edit`, `write`, and direct `worker` launches are blocked at the tool-call boundary.
 - **Searchable Model Picker:** Pi's default selector renders every option without scrolling, so long model lists get clipped. The picker in this extension scrolls, filters as you type, and returns to the menu after a pick.
 - **Tab-Cycling Rows:** `Tab` cycles the focused row — toggle optional stages or step through thinking levels without leaving the menu.
@@ -42,8 +42,8 @@ A rule written in `AGENTS.md` is soft context: the main model may read it and st
 
 The manager does not run the stages itself: it calls `orchestrate(task)`, and the whole sequence executes inside the tool. Each stage's output is handed to the next, so later stages can only reason about work that actually happened.
 
-- **Stages 1-2 are sequential.** The codebase scout produces a brief; the coder implements from it.
-- **Stage 3 is parallel.** Both reviewers receive the same brief and run concurrently.
+- **The manager owns context.** It inspects the relevant code and includes its findings and acceptance criteria in the task passed to `orchestrate`.
+- **The review stage is parallel.** Security and QA receive the same manager context and implementation report.
 - **The fix round is conditional and hardcoded to one pass.** A `blocked` verdict buys exactly one repair; there is no re-review afterwards, and no retry loop.
 - **A dead reviewer is not a clean reviewer.** A reviewer that fails, lacks evidence, or returns no valid verdict makes the result `unverified`. Infrastructure failures alone never launch a speculative code fix.
 
@@ -56,12 +56,11 @@ If both reviewers pass and both upstream stages succeeded, the change was never 
 | Role | Default Agent | Stage | Responsibility |
 |:---|:---|:---|:---|
 | **Manager** | *main session* | routes + accepts | Picks the models, hands off the task, synthesizes the report, makes the final call without post-review source edits. |
-| **Context engine** | `scout` | 1 | Gathers the files, facts, and constraints. Read-only. |
-| **Lead coder** | `worker` | 2 | Implements from that context. The only writer. |
-| **Security specialist** | `reviewer` | 3 | Audits the diff for injection, authorization, secrets, and unsafe input handling. |
-| **QA** | `oracle` | 3 | Runs the tests and reports pass/fail evidence. Needs an exec-capable agent (`bash`); a read-only reviewer can only inspect, so it would return `blocked` for the unverified re-run. |
+| **Lead coder** | `worker` | 1 | Implements from the manager context. The only writer. |
+| **Security specialist** | `reviewer` | 2 | Audits the diff for injection, authorization, secrets, and unsafe input handling. |
+| **QA** | `oracle` | 2 | Runs the tests and reports pass/fail evidence. Needs an exec-capable agent (`bash`); a read-only reviewer can only inspect, so it would return `blocked` for the unverified re-run. |
 
-Stages 3 run **in parallel**; concrete blockers from valid reviewers buy at most one fix round before the final answer.
+Security and QA run **in parallel**; concrete blockers from valid reviewers buy at most one fix round before the final answer.
 
 ---
 
@@ -144,7 +143,7 @@ Without a prompt, `/orchestrator` shows usage. Configure models and optional sta
 /orchestrator-settings
 ```
 
-The settings menu retains manager/role models, thinking levels, optional research,
+The settings menu retains manager/role models, thinking levels, and optional
 security and QA stages, and bridge status. There is no master ON/OFF row. `Tab`
 cycles the selected stage or thinking value; Enter on a model opens its picker.
 The settings menu scrolls but does not filter rows. Model pickers support search.
@@ -165,7 +164,7 @@ No pagination. The list scrolls, the current model is marked `✓`, and typing f
 Submit a code change using `/orchestrator <prompt>`. The manager calls `orchestrate`, which returns:
 
 ```text
-Stages: research -> implement -> security+QA (parallel) -> at most one fix round.
+Stages: manager context -> implement -> security+QA (parallel) -> at most one fix round.
 ```
 
 | Verdict | Meaning |
@@ -196,13 +195,11 @@ Written to `~/.pi/agent/orchestrator.json`:
 ```json
 {
   "roles": {
-    "context": "provider/model",
     "coder": "provider/model",
     "security": "provider/model",
     "qa": "provider/model"
   },
   "thinking": {
-    "context": "",
     "coder": "high",
     "security": "",
     "qa": ""
@@ -264,7 +261,7 @@ pi-orchestrator/
 This project is licensed under the [MIT License](LICENSE).
 
 ### Failure handling
-Research and implementation failures stop the pipeline immediately. Implementation
+Implementation failures stop the pipeline immediately. Implementation
 failure may leave partial file changes: inspect the working tree before retrying.
 Infrastructure failures do not trigger reviewers or an automatic code-fix round.
 
@@ -298,15 +295,12 @@ Run regression checks with Node 22.13+:
 `node --test tests/*.test.mjs` (Node's TypeScript-strip warning is expected).
 
 ### Optional roles
-`/orchestrator-settings` has independent **Run Context engine**, **Run Security specialist**,
-and **Run QA** ON/OFF rows (Tab or Enter). Lead coder is always required. The model
-and thinking settings are retained while a role is OFF. Existing configurations
-keep all three stages ON; the saved `stages` object uses `context`, `security`, and
-`qa` booleans. Only explicit `false` disables a stage.
-
-Research OFF makes the coder inspect the relevant files itself. Security and QA
-run only when enabled, in parallel when both are enabled. Turning all three OFF
-runs only the coder. Toggles are captured at pipeline launch; changes apply to the
+`/orchestrator-settings` has independent **Run Security specialist** and **Run QA**
+ON/OFF rows (Tab or Enter). Lead coder is always required. The model
+and thinking settings are retained while a role is OFF. Existing configurations keep both stages ON; legacy `context` settings are ignored.
+The saved `stages` object uses `security` and `qa` booleans. Only explicit `false`
+disables a stage. Security and QA run only when enabled, in parallel when both are
+enabled. Turning both OFF runs only the coder. Toggles are captured at pipeline launch; changes apply to the
 next run, not children already running. Use Pi’s normal abort control to cancel a current run.
 
 Reports list `skipped` stages. A successful run with either reviewer OFF returns
@@ -317,10 +311,9 @@ A failed enabled reviewer alone does not trigger a fix. Concrete code blockers f
 count as deliberately skipped checks.
 
 ### Handoff and verification contracts
-Research reports scope and acceptance criteria, connected files/callers/tests,
-constraints and existing user changes, a minimum plan, actual verification commands,
-and uncertainties. The coder preserves unrelated changes and reports test commands,
-exit statuses and limitations. The manager does not make unreviewed final source edits.
+The manager supplies scope, acceptance criteria, and relevant codebase context to the
+pipeline. The coder still inspects the working tree, preserves unrelated changes, and
+reports test commands, exit statuses and limitations. The manager does not make unreviewed final source edits.
 
 Reviewers independently inspect the actual diff and connected callers; the coder
 report is guidance, not proof. They must not edit source or revert user changes
@@ -332,7 +325,7 @@ agent-reported, not machine-attested proof that commands ran — pass `verify` w
 green result must rest on an exit status instead.
 
 Only concrete findings from valid blocked reviews reach the fixer, along with
-research, implementation context and reviewer evidence. Invalid or failed reviews
+manager context, implementation context and reviewer evidence. Invalid or failed reviews
 are preserved in the final report. A fix reruns failing commands and relevant
 regression tests, remains limited to one pass, and always reports
 `fixed-unverified` or `unverified`, never `clean`. No automatic re-review is added.
@@ -342,11 +335,8 @@ quality, latency and cost benchmarks are not yet established; use measured task
 runs before adding routing heuristics, more agents or review loops.
 
 ### Runtime stage failures
-The context role uses pi-subagents' codebase `scout`, not its web-oriented
-`researcher`. Research stays within task scope; standalone temporary fixtures do
-not require auditing the host repository. Empty model/thinking arguments are
-omitted so the bridge can apply defaults. Stage exceptions are captured as failed
-results: upstream failures stop downstream work, while reviewer failures preserve
-independent sibling results without launching a speculative fix. Failed fixer
-reports retain the original error. This does not repair upstream provider streams;
-a transport failure still yields an honest `unverified` result.
+Implementation failures stop downstream review and may leave partial changes. Empty
+model/thinking arguments are omitted so the bridge can apply defaults. Reviewer stage
+exceptions preserve independent sibling results without launching a speculative fix.
+Failed fixer reports retain the original error. This does not repair upstream provider
+streams; a transport failure still yields an honest `unverified` result.
